@@ -10,6 +10,8 @@
 
 #include <Servo.h>
 #include <math.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 static const char *FW_VERSION = "2.0.0";
 static const uint32_t BAUDRATE = 115200;
@@ -32,6 +34,7 @@ typedef struct PIDCtrl
   unsigned long last_ms;
   int out_pin;
   int sensor_pin;
+  bool use_ds18;
   float minC;
   float maxC;
   bool fault;
@@ -59,13 +62,35 @@ static PIDCtrl pid_reserve;
 #define HEAT_RES_PIN 10
 #define SERVO_PIN 11
 
-#define TH_WATER A13
+#define WATER_DS_PIN 3  // X_MIN endstop (digital) pour DS18B20 eau
+#define AIR_DS_PIN 2    // X_MAX endstop (digital) pour DS18B20 air
+#define YMIN_DS_PIN 14  // Y_MIN endstop (digital) pour DS18B20 #3
+#define YMAX_DS_PIN 15  // Y_MAX endstop (digital) pour DS18B20 #4
+// pH sur T0/A13. Thermistances : auxiliaire sur A12 (AUX-2). Eau/Air/sondes Y en DS18B20.
+#define TH_WATER A15
 #define TH_AIR A14
-#define TH_AUX A15
+#define TH_AUX A12
+#define PH_PIN A13  // T0
 
-#define LVL_LOW_PIN 3
-#define LVL_HIGH_PIN 14
-#define LVL_ALERT_PIN 18
+#define LVL_LOW_PIN 18   // Z_MIN
+#define LVL_HIGH_PIN 19  // Z_MAX
+#define LVL_ALERT_PIN 4  // libre (AUX-2) pour alerte niveau
+
+static OneWire oneWireWater(WATER_DS_PIN);
+static DallasTemperature ds18Water(&oneWireWater);
+static OneWire oneWireAir(AIR_DS_PIN);
+static DallasTemperature ds18Air(&oneWireAir);
+static OneWire oneWireYMin(YMIN_DS_PIN);
+static DallasTemperature ds18YMin(&oneWireYMin);
+static OneWire oneWireYMax(YMAX_DS_PIN);
+static DallasTemperature ds18YMax(&oneWireYMax);
+
+static const uint8_t DS_COUNT = 4;
+static DallasTemperature *ds_list[DS_COUNT] = {&ds18Water, &ds18Air, &ds18YMin, &ds18YMax};
+static float cached_ds[DS_COUNT] = {NAN, NAN, NAN, NAN};
+static bool ds18_pending = false;
+static unsigned long ds18_ready_ms = 0;
+static unsigned long ds18_next_request_ms = 0;
 
 // --------------- Helpers -----------------
 static inline void send_ok() { Serial.println("OK"); }
@@ -75,6 +100,12 @@ static inline void send_err(const char *code, const char *message)
   Serial.print(code);
   Serial.print("|");
   Serial.println(message);
+}
+
+static float read_ph_voltage()
+{
+  int raw = analogRead(PH_PIN);
+  return (raw / 1023.0f) * 5.0f;
 }
 
 static float read_tempC(uint8_t pin)
@@ -88,11 +119,31 @@ static float read_tempC(uint8_t pin)
   return (1.0f / invT) - 273.15f;
 }
 
+static float read_water_tempC()
+{
+  return cached_ds[0];
+}
+
+static float read_air_tempC()
+{
+  return cached_ds[1];
+}
+
+static float read_ymin_tempC()
+{
+  return cached_ds[2];
+}
+
+static float read_ymax_tempC()
+{
+  return cached_ds[3];
+}
+
 static bool level_low() { return digitalRead(LVL_LOW_PIN) == LOW; }
 static bool level_high() { return digitalRead(LVL_HIGH_PIN) == LOW; }
 static bool level_alert() { return digitalRead(LVL_ALERT_PIN) == LOW; }
 
-static void pid_controller_init(PIDCtrl *p, int out_pin, int sensor_pin, float maxC)
+static void pid_controller_init(PIDCtrl *p, int out_pin, int sensor_pin, float maxC, bool use_ds18 = false)
 {
   if (!p)
     return;
@@ -105,6 +156,7 @@ static void pid_controller_init(PIDCtrl *p, int out_pin, int sensor_pin, float m
   p->last_ms = 0;
   p->out_pin = out_pin;
   p->sensor_pin = sensor_pin;
+  p->use_ds18 = use_ds18;
   p->minC = -5.0f;
   p->maxC = maxC;
   p->fault = false;
@@ -124,7 +176,7 @@ static int pid_controller_compute(PIDCtrl *p)
 {
   if (!p)
     return 0;
-  float t = read_tempC(p->sensor_pin);
+  float t = p->use_ds18 ? read_water_tempC() : read_tempC(p->sensor_pin);
   if (isnan(t) || t < p->minC - 1 || t > p->maxC + 5)
   {
     p->fault = true;
@@ -160,6 +212,30 @@ static void heaters_service()
   analogWrite(HEAT_WATER_PIN, pwm > 0 ? 255 : 0);
   pwm = pid_controller_compute(&pid_reserve);
   analogWrite(HEAT_RES_PIN, pwm > 0 ? 255 : 0);
+}
+
+static void ds18_service()
+{
+  unsigned long now = millis();
+  if (!ds18_pending && now >= ds18_next_request_ms)
+  {
+    for (uint8_t i = 0; i < DS_COUNT; ++i)
+    {
+      ds_list[i]->requestTemperatures();
+    }
+    ds18_ready_ms = now + 800; // 12-bit conversion ~750ms
+    ds18_pending = true;
+  }
+  else if (ds18_pending && (long)(now - ds18_ready_ms) >= 0)
+  {
+    for (uint8_t i = 0; i < DS_COUNT; ++i)
+    {
+      float t = ds_list[i]->getTempCByIndex(0);
+      cached_ds[i] = (t > -55.0f && t < 125.0f) ? t : NAN;
+    }
+    ds18_pending = false;
+    ds18_next_request_ms = now + 500; // brief pause before next cycle
+  }
 }
 
 // --------------- Servo -------------------
@@ -307,11 +383,19 @@ static void send_status()
   Serial.print(";LEVEL_ALERT=");
   Serial.print(level_alert());
   Serial.print(";TEMPW=");
-  Serial.print(read_tempC(TH_WATER), 1);
+  Serial.print(read_water_tempC(), 1);
   Serial.print(";TEMPA=");
-  Serial.print(read_tempC(TH_AIR), 1);
+  Serial.print(read_air_tempC(), 1);
   Serial.print(";TEMPAUX=");
   Serial.print(read_tempC(TH_AUX), 1);
+  Serial.print(";TEMPYMIN=");
+  Serial.print(read_ymin_tempC(), 1);
+  Serial.print(";TEMPYMAX=");
+  Serial.print(read_ymax_tempC(), 1);
+  Serial.print(";PH_V=");
+  Serial.print(read_ph_voltage(), 3);
+  Serial.print(";PH_RAW=");
+  Serial.print(analogRead(PH_PIN));
   Serial.print(";SERVO=");
   Serial.print(feeder.read());
   Serial.println();
@@ -320,11 +404,19 @@ static void send_status()
 static void send_temps()
 {
   Serial.print("T_WATER:");
-  Serial.print(read_tempC(TH_WATER), 1);
+  Serial.print(read_water_tempC(), 1);
   Serial.print("|T_AIR:");
-  Serial.print(read_tempC(TH_AIR), 1);
+  Serial.print(read_air_tempC(), 1);
   Serial.print("|T_AUX:");
   Serial.print(read_tempC(TH_AUX), 1);
+  Serial.print("|T_YMIN:");
+  Serial.print(read_ymin_tempC(), 1);
+  Serial.print("|T_YMAX:");
+  Serial.print(read_ymax_tempC(), 1);
+  Serial.print("|PH_V:");
+  Serial.print(read_ph_voltage(), 3);
+  Serial.print("|PH_RAW:");
+  Serial.print(analogRead(PH_PIN));
   Serial.println();
 }
 
@@ -363,6 +455,11 @@ static void process_command(String s)
     return;
   }
   if (s == "TEMP?")
+  {
+    send_temps();
+    return;
+  }
+  if (s == "PH?")
   {
     send_temps();
     return;
@@ -535,6 +632,12 @@ static void process_command(String s)
 void setup()
 {
   Serial.begin(BAUDRATE);
+  for (uint8_t i = 0; i < DS_COUNT; ++i)
+  {
+    ds_list[i]->begin();
+    ds_list[i]->setWaitForConversion(false); // non-bloquant
+    ds_list[i]->setResolution(12);
+  }
 
   pinMode(X_STEP, OUTPUT);
   pinMode(X_DIR, OUTPUT);
@@ -562,7 +665,7 @@ void setup()
   pinMode(HEAT_RES_PIN, OUTPUT);
   pinMode(FAN_PIN, OUTPUT);
 
-  pid_controller_init(&pid_water, HEAT_WATER_PIN, TH_WATER, 40.0f);
+  pid_controller_init(&pid_water, HEAT_WATER_PIN, TH_WATER, 40.0f, true);
   pid_controller_init(&pid_reserve, HEAT_RES_PIN, TH_AUX, 60.0f);
 
   feeder.attach(SERVO_PIN);
@@ -574,6 +677,7 @@ void setup()
 
 void loop()
 {
+  ds18_service();
   stepper_service();
   heaters_service();
   fan_service();

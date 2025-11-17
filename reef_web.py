@@ -81,6 +81,8 @@ def api_action():
             controller.toggle_light(params.get("state"))
         elif action == "light_auto":
             controller.set_light_auto(bool(params.get("enable", False)))
+        elif action == "update_temp_names":
+            controller.update_temp_names(params)
         elif action == "raw":
             controller.raw(str(params.get("cmd", "")))
         elif action == "emergency_stop":

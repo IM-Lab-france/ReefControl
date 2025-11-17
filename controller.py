@@ -1,4 +1,5 @@
 ﻿import json
+import math
 import logging
 import queue
 import threading
@@ -19,6 +20,7 @@ HANDSHAKE_TIMEOUT = 4.0
 PUMP_CONFIG_PATH = Path("pump_config.json")
 LIGHT_SCHEDULE_PATH = Path("light_schedule.json")
 HEAT_CONFIG_PATH = Path("heat_config.json")
+TEMP_NAMES_PATH = Path("temp_names.json")
 LIGHT_GPIO_PIN = 27
 LIGHT_DAY_KEYS = [
     "monday",
@@ -159,6 +161,17 @@ class ReefController:
             "heat_auto": True,
             "heat_enabled": True,
             "heat_state": {"water": True, "reserve": True},
+            "ph_v": None,
+            "ph_raw": None,
+            "ty_min": "--.-",
+            "ty_max": "--.-",
+            "temp_names": {
+                "water": "Eau",
+                "air": "Air",
+                "aux": "Aux",
+                "ymin": "Y-Min",
+                "ymax": "Y-Max",
+            },
         }
         self.global_speed = 300
         self.steps_per_job = 1000
@@ -166,6 +179,7 @@ class ReefController:
         self._ensure_pump_defaults()
         self._ensure_light_schedule_defaults()
         self._load_heat_config()
+        self._load_temp_names()
         self.light_gpio_ready = False
         self._init_light_gpio()
         self._last_temp_query = 0.0
@@ -190,6 +204,7 @@ class ReefController:
                 self.state["light_schedule"] = json.loads(LIGHT_SCHEDULE_PATH.read_text("utf-8"))
             except Exception:
                 pass
+        self._load_temp_names()
 
     def _save_pump_config(self) -> None:
         try:
@@ -202,6 +217,21 @@ class ReefController:
             LIGHT_SCHEDULE_PATH.write_text(json.dumps(self.state["light_schedule"], indent=2), encoding="utf-8")
         except Exception as exc:
             logger.error("Unable to save light schedule: %s", exc)
+
+    def _load_temp_names(self) -> None:
+        if TEMP_NAMES_PATH.exists():
+            try:
+                data = json.loads(TEMP_NAMES_PATH.read_text("utf-8"))
+                if isinstance(data, dict):
+                    self.state.setdefault("temp_names", {}).update(data)
+            except Exception:
+                pass
+
+    def _save_temp_names(self) -> None:
+        try:
+            TEMP_NAMES_PATH.write_text(json.dumps(self.state.get("temp_names", {}), indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.error("Unable to save temp names: %s", exc)
 
     def _load_heat_config(self) -> None:
         if HEAT_CONFIG_PATH.exists():
@@ -233,6 +263,13 @@ class ReefController:
             HEAT_CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
             logger.error("Unable to save heat config: %s", exc)
+
+    def _apply_heat_targets(self) -> None:
+        """Reapplique les consignes de chauffe après connexion."""
+        if self.state.get("heat_auto", True):
+            self._evaluate_heat_needs()
+        else:
+            self._update_heater_outputs()
 
     def _ensure_pump_defaults(self) -> None:
         defaults = {
@@ -437,11 +474,25 @@ class ReefController:
                 elif key == "level_alert":
                     self.state["lvl_alert"] = value
                 elif key == "tempw":
-                    self.state["tw"] = value
+                    self.state["tw"] = self._sanitize_temp_text(value, self.state.get("tw", "--.-"))
                 elif key == "tempa":
-                    self.state["ta"] = value
+                    self.state["ta"] = self._sanitize_temp_text(value, self.state.get("ta", "--.-"))
                 elif key == "tempaux":
-                    self.state["tx"] = value
+                    self.state["tx"] = self._sanitize_temp_text(value, self.state.get("tx", "--.-"))
+                elif key == "tempymin":
+                    self.state["ty_min"] = self._sanitize_temp_text(value, self.state.get("ty_min", "--.-"))
+                elif key == "tempymax":
+                    self.state["ty_max"] = self._sanitize_temp_text(value, self.state.get("ty_max", "--.-"))
+                elif key == "ph_v":
+                    try:
+                        self.state["ph_v"] = float(value)
+                    except ValueError:
+                        pass
+                elif key == "ph_raw":
+                    try:
+                        self.state["ph_raw"] = int(float(value))
+                    except ValueError:
+                        pass
                 elif key == "servo":
                     try:
                         self.state["servo_angle"] = int(float(value))
@@ -457,9 +508,19 @@ class ReefController:
                 k, v = part.split(":", 1)
                 vals[k.strip().lower()] = v.strip()
         with self.state_lock:
-            self.state["tw"] = vals.get("t_water", self.state["tw"])
-            self.state["ta"] = vals.get("t_air", self.state["ta"])
-            self.state["tx"] = vals.get("t_aux", self.state["tx"])
+            self.state["tw"] = self._sanitize_temp_text(vals.get("t_water"), self.state.get("tw", "--.-"))
+            self.state["ta"] = self._sanitize_temp_text(vals.get("t_air"), self.state.get("ta", "--.-"))
+            self.state["tx"] = self._sanitize_temp_text(vals.get("t_aux"), self.state.get("tx", "--.-"))
+            self.state["ty_min"] = self._sanitize_temp_text(vals.get("t_ymin"), self.state.get("ty_min", "--.-"))
+            self.state["ty_max"] = self._sanitize_temp_text(vals.get("t_ymax"), self.state.get("ty_max", "--.-"))
+            try:
+                self.state["ph_v"] = float(vals.get("ph_v", self.state.get("ph_v")))
+            except Exception:
+                pass
+            try:
+                self.state["ph_raw"] = int(float(vals.get("ph_raw", self.state.get("ph_raw"))))
+            except Exception:
+                pass
         self._evaluate_heat_needs()
 
     def _apply_level_line(self, line: str) -> None:
@@ -550,6 +611,15 @@ class ReefController:
             self._save_heat_config()
             self._update_heater_outputs()
 
+    def _sanitize_temp_text(self, raw: Any, fallback: str) -> str:
+        try:
+            val = float(str(raw).replace(",", "."))
+            if math.isnan(val) or math.isinf(val):
+                return fallback
+            return f"{val:.1f}"
+        except Exception:
+            return fallback
+
     def _send_query(self, command: str) -> None:
         if not self.connected:
             raise RuntimeError("Non connecté")
@@ -631,6 +701,17 @@ class ReefController:
             with self.state_lock:
                 self.state["auto_fan"] = False
             self._send_command("FAN 0")
+
+    def update_temp_names(self, names: Dict[str, str]) -> None:
+        if not isinstance(names, dict):
+            return
+        allowed = {"water", "air", "aux", "ymin", "ymax"}
+        with self.state_lock:
+            current = self.state.setdefault("temp_names", {})
+            for key, val in names.items():
+                if key in allowed and isinstance(val, str) and val.strip():
+                    current[key] = val.strip()
+        self._save_temp_names()
 
     def set_heat_mode(self, auto: bool) -> None:
         with self.state_lock:

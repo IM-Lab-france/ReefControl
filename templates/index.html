@@ -50,6 +50,10 @@
                     role="tab">Éclairage</button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-water" type="button"
+                    role="tab">Eau</button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-config" type="button"
                     role="tab">Configuration</button>
             </li>
@@ -68,15 +72,23 @@
                             <div class="row">
                                 <div class="col-6 mb-2">
                                     <div class="temp-main" id="tw_val">--.-°C</div>
-                                    <div class="temp-small text-secondary">Eau</div>
+                                    <div class="temp-small text-secondary" id="tw_label">Eau</div>
                                 </div>
                                 <div class="col-6 mb-2">
                                     <div class="temp-main" id="ta_val">--.-°C</div>
-                                    <div class="temp-small text-secondary">Air</div>
+                                    <div class="temp-small text-secondary" id="ta_label">Air</div>
                                 </div>
                                 <div class="col-12">
                                     <div class="temp-main" id="tx_val">--.-°C</div>
-                                    <div class="temp-small text-secondary">Aux</div>
+                                    <div class="temp-small text-secondary" id="tx_label">Aux</div>
+                                </div>
+                                <div class="col-6 mb-2">
+                                    <div class="temp-main" id="tymin_val">--.-°C</div>
+                                    <div class="temp-small text-secondary" id="tymin_label">Y-Min</div>
+                                </div>
+                                <div class="col-6 mb-2">
+                                    <div class="temp-main" id="tymax_val">--.-°C</div>
+                                    <div class="temp-small text-secondary" id="tymax_label">Y-Max</div>
                                 </div>
                             </div>
                             <hr class="border-secondary-subtle" />
@@ -368,6 +380,76 @@
                                 <span id="lightAutoLabel" class="fw-semibold text-white small">Auto</span>
                             </div>
                             <p class="small text-secondary mb-0">Désactivez pour gérer l’éclairage manuellement.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="tab-water" role="tabpanel">
+                <div class="reef-card">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="fw-semibold">Suivi pH</div>
+                        <button class="btn btn-sm btn-outline-light" data-action="readTemps">Rafraîchir</button>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div class="reef-stat">
+                                <div class="reef-stat-label">Tension sonde (0-5V)</div>
+                                <div class="reef-stat-value" id="ph_v_val">--.- V</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="reef-stat">
+                                <div class="reef-stat-label">ADC brut</div>
+                                <div class="reef-stat-value" id="ph_raw_val">----</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="alert alert-secondary small mb-0">
+                                PH-4502C branché sur T0 (A13). Thermistances : auxiliaire sur A12 (AUX-2). Températures : eau X-MIN (D3), air X-MAX (D2), Y-Min (D14), Y-Max (D15).
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-2">
+                        <div class="col-md-6">
+                            <div class="reef-stat">
+                                <div class="reef-stat-label" id="tymin_label2">Y-Min</div>
+                                <div class="reef-stat-value" id="tymin_val2">--.-°C</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="reef-stat">
+                                <div class="reef-stat-label" id="tymax_label2">Y-Max</div>
+                                <div class="reef-stat-value" id="tymax_val2">--.-°C</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="reef-card mt-3">
+                        <div class="fw-semibold mb-2">Noms des sondes</div>
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Eau</label>
+                                <input id="tempName_water" class="form-control form-control-sm" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Air</label>
+                                <input id="tempName_air" class="form-control form-control-sm" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Aux</label>
+                                <input id="tempName_aux" class="form-control form-control-sm" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Y-Min</label>
+                                <input id="tempName_ymin" class="form-control form-control-sm" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Y-Max</label>
+                                <input id="tempName_ymax" class="form-control form-control-sm" />
+                            </div>
+                            <div class="col-md-4 d-flex align-items-end">
+                                <button class="btn btn-aqua w-100" data-action="saveTempNames">Enregistrer</button>
+                            </div>
                         </div>
                     </div>
                 </div>

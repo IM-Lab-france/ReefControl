@@ -265,6 +265,36 @@ function applyStateToUI(state) {
     document.getElementById("tw_val").textContent = `${state.tw || "--.-"}°C`;
     document.getElementById("ta_val").textContent = `${state.ta || "--.-"}°C`;
     document.getElementById("tx_val").textContent = `${state.tx || "--.-"}°C`;
+    document.getElementById("tymin_val").textContent = `${state.ty_min || "--.-"}°C`;
+    document.getElementById("tymax_val").textContent = `${state.ty_max || "--.-"}°C`;
+    const tempNames = state.temp_names || {};
+    const tname = (k, d) => tempNames[k] || d;
+    const mirrorLabel = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+    };
+    mirrorLabel("tw_label", tname("water", "Eau"));
+    mirrorLabel("ta_label", tname("air", "Air"));
+    mirrorLabel("tx_label", tname("aux", "Aux"));
+    mirrorLabel("tymin_label", tname("ymin", "Y-Min"));
+    mirrorLabel("tymax_label", tname("ymax", "Y-Max"));
+    mirrorLabel("tymin_label2", tname("ymin", "Y-Min"));
+    mirrorLabel("tymax_label2", tname("ymax", "Y-Max"));
+    const mirrorVal = (id, val, suffix = "°C") => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = `${val || "--.-"}${suffix}`;
+    };
+    mirrorVal("tymin_val2", state.ty_min);
+    mirrorVal("tymax_val2", state.ty_max);
+    setInputIfIdle("tempName_water", tname("water", "Eau"));
+    setInputIfIdle("tempName_air", tname("air", "Air"));
+    setInputIfIdle("tempName_aux", tname("aux", "Aux"));
+    setInputIfIdle("tempName_ymin", tname("ymin", "Y-Min"));
+    setInputIfIdle("tempName_ymax", tname("ymax", "Y-Max"));
+    const phV = state.ph_v ?? state.phV ?? null;
+    const phRaw = state.ph_raw ?? state.phRaw ?? null;
+    document.getElementById("ph_v_val").textContent = phV !== null && phV !== undefined ? `${phV} V` : "--.- V";
+    document.getElementById("ph_raw_val").textContent = phRaw !== null && phRaw !== undefined ? phRaw : "----";
     const heatTargets = state.heat_targets || {};
     document.getElementById("tset_water_label").textContent = `${heatTargets.water ?? state.tset_water ?? "--.-"}°C`;
     document.getElementById("tset_res_label").textContent = `${heatTargets.reserve ?? state.tset_res ?? "--.-"}°C`;
@@ -422,6 +452,18 @@ function setInputIfIdle(id, value) {
     }
 }
 
+async function saveTempNames() {
+    const payload = {
+        water: document.getElementById("tempName_water")?.value || "",
+        air: document.getElementById("tempName_air")?.value || "",
+        aux: document.getElementById("tempName_aux")?.value || "",
+        ymin: document.getElementById("tempName_ymin")?.value || "",
+        ymax: document.getElementById("tempName_ymax")?.value || "",
+    };
+    await apiAction("update_temp_names", payload);
+    refreshState();
+}
+
 const clickHandlers = {
     refreshPorts: () => refreshPorts(),
     connect: () => connect(),
@@ -455,6 +497,7 @@ const changeHandlers = {
     mtrAutoToggle: () => onMtrAutoChanged(),
     lightAuto: (target) => setLightAuto(target.value === "1"),
     heatMode: (target) => setHeatMode(target.checked),
+    saveTempNames: () => saveTempNames(),
 };
 
 function initDelegates() {
