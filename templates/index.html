@@ -1,0 +1,440 @@
+﻿<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Reef Controller</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet" />
+</head>
+
+<body>
+    <div class="container py-3 py-md-4">
+        <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-3">
+            <div>
+                <h1 class="h3 mb-1">Reef Controller</h1>
+                <p class="text-secondary small mb-0">Contrôle aquarium – Arduino Mega + interface web</p>
+            </div>
+            <div class="d-flex flex-column flex-md-row gap-2 align-items-md-center">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="small text-secondary">Port série</span>
+                    <select id="portSelect" class="form-select form-select-sm" style="min-width: 210px;"></select>
+                    <button class="btn btn-sm btn-outline-light" data-action="refreshPorts">↻</button>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <span id="statusBadge" class="badge reef-badge bg-secondary-subtle text-uppercase">Déconnecté</span>
+                    <button class="btn btn-sm btn-outline-light" data-action="connect">Connecter</button>
+                    <button class="btn btn-sm btn-outline-danger" data-action="disconnect">Déconnecter</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="megaError" class="alert alert-danger py-2 px-3 small d-none"></div>
+
+        <ul class="nav nav-pills mb-3" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-dashboard" type="button"
+                    role="tab">Dashboard</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-pumps" type="button"
+                    role="tab">Pompes</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-heat" type="button"
+                    role="tab">Chauffes</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-light" type="button"
+                    role="tab">Éclairage</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-config" type="button"
+                    role="tab">Configuration</button>
+            </li>
+
+        </ul>
+
+        <div class="tab-content">
+            <div class="tab-pane fade show active" id="tab-dashboard" role="tabpanel">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <div class="reef-card h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div class="fw-semibold">🌡️ Températures</div>
+                                <button class="btn btn-sm btn-aqua" data-action="readTemps">Actualiser</button>
+                            </div>
+                            <div class="row">
+                                <div class="col-6 mb-2">
+                                    <div class="temp-main" id="tw_val">--.-°C</div>
+                                    <div class="temp-small text-secondary">Eau</div>
+                                </div>
+                                <div class="col-6 mb-2">
+                                    <div class="temp-main" id="ta_val">--.-°C</div>
+                                    <div class="temp-small text-secondary">Air</div>
+                                </div>
+                                <div class="col-12">
+                                    <div class="temp-main" id="tx_val">--.-°C</div>
+                                    <div class="temp-small text-secondary">Aux</div>
+                                </div>
+                            </div>
+                            <hr class="border-secondary-subtle" />
+                            <div class="d-flex justify-content-between small mb-1">
+                                <span>Consigne eau</span>
+                                <span id="tset_water_label">--.-°C</span>
+                            </div>
+                            <div class="d-flex justify-content-between small">
+                                <span>Consigne réserve</span>
+                                <span id="tset_res_label">--.-°C</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="reef-card h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div class="fw-semibold">🌀 Ventilation</div>
+                                <button class="btn btn-sm btn-outline-light" data-action="applyAutocool">Auto</button>
+                            </div>
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between small">
+                                    <span>Mode</span>
+                                    <span class="badge reef-badge" id="autoFanModeBadge">Auto</span>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="autoFanChk"
+                                        data-change="autoFanToggle" />
+                                    <label class="form-check-label small" for="autoFanChk">Auto-fan</label>
+                                </div>
+                            </div>
+                            <hr class="border-secondary-subtle" />
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between small">
+                                    <span>Seuil auto-cool (°C)</span>
+                                    <span id="auto_thresh_label">--.-</span>
+                                </div>
+                                <div class="input-group input-group-sm">
+                                    <input id="auto_thresh" type="number" step="0.1" class="form-control" />
+                                    <button class="btn btn-aqua" data-action="applyAutocool">Appliquer</button>
+                                </div>
+                            </div>
+                            <hr class="border-secondary-subtle" />
+                            <div>
+                                <div class="d-flex justify-content-between small mb-1">
+                                    <span>Vitesse ventilo</span>
+                                    <span id="fan_val">0</span>
+                                </div>
+                                <input id="fanSlider" type="range" min="0" max="255" class="form-range"
+                                    data-input="fanSlider" />
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="reef-card h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div class="fw-semibold">💧 Niveaux / Sécurité</div>
+                                <button class="btn btn-sm btn-outline-light" data-action="readLevels">Refresh</button>
+                            </div>
+                            <div class="mb-2">
+                                <div class="section-title mb-1">Niveaux</div>
+                                <div class="d-flex flex-wrap gap-1">
+                                    <span id="lvl_low" class="badge level-pill level-pill-unk">Bac bas: ?</span>
+                                    <span id="lvl_high" class="badge level-pill level-pill-unk">Bac haut: ?</span>
+                                    <span id="lvl_alert" class="badge level-pill level-pill-unk">Alarme: ?</span>
+                                </div>
+                            </div>
+                            <hr class="border-secondary-subtle" />
+                            <div class="mb-2">
+                                <div class="section-title mb-1">Protection</div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span id="protectBadge" class="badge reef-badge badge-protect-off">PROTECT
+                                        OFF</span>
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="protectChk"
+                                            data-change="protectToggle" />
+                                        <label class="form-check-label small" for="protectChk">Arrêt auto pompes sur
+                                            niveau bas</label>
+                                    </div>
+                                </div>
+                            </div>
+                            <hr class="border-secondary-subtle" />
+                            <div>
+                                <div class="section-title mb-1">Servo nourrisseur</div>
+                                <div class="input-group input-group-sm mb-2">
+                                    <span class="input-group-text">Angle</span>
+                                    <input id="servoAngle" type="number" class="form-control" />
+                                    <button class="btn btn-aqua" data-action="applyServo">Set</button>
+                                </div>
+                                <button class="btn btn-sm btn-outline-light w-100" data-action="dispenseMacro">Séquence
+                                    distribution</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="tab-pumps" role="tabpanel">
+                <div class="reef-card">
+                    <div class="fw-semibold mb-2">⛲ Pompes péristaltiques</div>
+                    <div class="row g-2 align-items-end mb-2">
+                        <div class="col-6 col-md-4 d-grid">
+                            <button class="btn btn-sm btn-aqua" data-action="motorRaw" data-cmd="MTR ON">MTR ON</button>
+                        </div>
+                        <div class="col-6 col-md-4 d-grid">
+                            <button class="btn btn-sm btn-danger" data-action="emergencyStop">MTR OFF</button>
+                        </div>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="mtrAutoChk" data-change="mtrAutoToggle"
+                            checked />
+                        <label class="form-check-label small" for="mtrAutoChk">Moteurs auto-OFF après mouvement</label>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="border rounded p-2 d-flex justify-content-between align-items-center">
+                                <div>
+                                    <div id="pumpLabel_X" class="fw-semibold small">Pompe X</div>
+                                    <div id="pumpInfo_X" class="small text-secondary">-</div>
+                                </div>
+                                <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="X">Go</button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border rounded p-2 d-flex justify-content-between align-items-center">
+                                <div>
+                                    <div id="pumpLabel_Y" class="fw-semibold small">Pompe Y</div>
+                                    <div id="pumpInfo_Y" class="small text-secondary">-</div>
+                                </div>
+                                <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="Y">Go</button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border rounded p-2 d-flex justify-content-between align-items-center">
+                                <div>
+                                    <div id="pumpLabel_Z" class="fw-semibold small">Pompe Z</div>
+                                    <div id="pumpInfo_Z" class="small text-secondary">-</div>
+                                </div>
+                                <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="Z">Go</button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border rounded p-2 d-flex justify-content-between align-items-center">
+                                <div>
+                                    <div id="pumpLabel_E" class="fw-semibold small">Pompe E</div>
+                                    <div id="pumpInfo_E" class="small text-secondary">-</div>
+                                </div>
+                                <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="E">Go</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="tab-heat" role="tabpanel">
+                <div class="reef-card mb-3">
+                    <div class="fw-semibold mb-3">🔥 Chauffes</div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small">Eau consigne °C</label>
+                            <div class="input-group input-group-sm">
+                                <input id="tset_water2" type="number" step="0.1" class="form-control" />
+                                <button class="btn btn-aqua" data-action="applyWater">Appliquer</button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">Réserve consigne °C</label>
+                            <div class="input-group input-group-sm">
+                                <input id="tset_res2" type="number" step="0.1" class="form-control" />
+                                <button class="btn btn-aqua" data-action="applyRes">Appliquer</button>
+                            </div>
+                        </div>
+                    </div>
+                    <hr class="border-secondary-subtle" />
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="heatModeSwitch" data-change="heatMode"
+                            checked />
+                        <label class="form-check-label small" for="heatModeSwitch">Mode automatique</label>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 mt-2">
+                        <span id="heatStatusLabel" class="small text-secondary">Mode automatique</span>
+                        <button class="btn btn-sm btn-outline-light" id="heatPowerBtn"
+                            data-action="heatPower">Éteindre</button>
+                    </div>
+                </div>
+                <div class="reef-card">
+                    <div class="fw-semibold mb-3">⚙️ PID</div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="section-title mb-2">Eau</div>
+                            <div class="row g-2">
+                                <div class="col-4">
+                                    <label class="form-label small">P</label>
+                                    <input id="pidwP" type="number" step="0.1" class="form-control form-control-sm" />
+                                </div>
+                                <div class="col-4">
+                                    <label class="form-label small">I</label>
+                                    <input id="pidwI" type="number" step="0.01" class="form-control form-control-sm" />
+                                </div>
+                                <div class="col-4">
+                                    <label class="form-label small">D</label>
+                                    <input id="pidwD" type="number" step="0.1" class="form-control form-control-sm" />
+                                </div>
+                            </div>
+                            <button class="btn btn-sm btn-aqua mt-2" data-action="applyPIDWater">Appliquer</button>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="section-title mb-2">Réserve</div>
+                            <div class="row g-2">
+                                <div class="col-4">
+                                    <label class="form-label small">P</label>
+                                    <input id="pidrP" type="number" step="0.1" class="form-control form-control-sm" />
+                                </div>
+                                <div class="col-4">
+                                    <label class="form-label small">I</label>
+                                    <input id="pidrI" type="number" step="0.01" class="form-control form-control-sm" />
+                                </div>
+                                <div class="col-4">
+                                    <label class="form-label small">D</label>
+                                    <input id="pidrD" type="number" step="0.1" class="form-control form-control-sm" />
+                                </div>
+                            </div>
+                            <button class="btn btn-sm btn-aqua mt-2" data-action="applyPIDRes">Appliquer</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {% set day_labels = [
+            ('monday','Lundi'),
+            ('tuesday','Mardi'),
+            ('wednesday','Mercredi'),
+            ('thursday','Jeudi'),
+            ('friday','Vendredi'),
+            ('saturday','Samedi'),
+            ('sunday','Dimanche')
+            ] %}
+            <div class="tab-pane fade" id="tab-light" role="tabpanel">
+                <div class="row g-3">
+                    <div class="col-12">
+                        <div class="reef-card">
+                            <div class="fw-semibold mb-3">Programmation hebdomadaire</div>
+                            <div class="table-responsive">
+                                <table class="table table-dark table-sm align-middle">
+                                    <thead>
+                                        <tr>
+                                            <th>Jour</th>
+                                            <th>Allumage</th>
+                                            <th>Extinction</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for key,label in day_labels %}
+                                        <tr>
+                                            <td class="text-nowrap">{{ label }}</td>
+                                            <td>
+                                                <input id="light_{{ key }}_on" type="time"
+                                                    class="form-control form-control-sm" />
+                                            </td>
+                                            <td>
+                                                <input id="light_{{ key }}_off" type="time"
+                                                    class="form-control form-control-sm" />
+                                            </td>
+                                            <td>
+                                                <button class="btn btn-sm btn-aqua" data-action="saveLightSchedule"
+                                                    data-day="{{ key }}">Enregistrer</button>
+                                            </td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <div class="reef-card">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <div class="fw-semibold">Contrôle manuel</div>
+                                    <div class="small text-secondary" id="lightStateLabel">Éteinte</div>
+                                </div>
+                                <button class="btn btn-sm btn-outline-light" id="lightToggleBtn"
+                                    data-action="toggleLight">Allumer</button>
+                            </div>
+                            <div class="mt-3 d-flex align-items-center gap-3">
+                                <span class="small text-secondary">Automatisation</span>
+                                <input id="lightAutoSlider" type="range" min="0" max="1" step="1" class="form-range"
+                                    style="width: 160px;" data-change="lightAuto" />
+                                <span id="lightAutoLabel" class="fw-semibold text-white small">Auto</span>
+                            </div>
+                            <p class="small text-secondary mb-0">Désactivez pour gérer l’éclairage manuellement.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="tab-config" role="tabpanel">
+                <div class="reef-card">
+                    <div class="fw-semibold mb-2">⚙️ Configuration moteurs</div>
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <label class="form-label small">Temps par pas (µs/step)</label>
+                            <div class="input-group input-group-sm">
+                                <input id="globalSpeedInput" type="number" class="form-control" />
+                                <button class="btn btn-aqua" data-action="applyGlobalSpeed">Enregistrer</button>
+                            </div>
+                            <small class="text-secondary">Valeur utilisée lors des mouvements automatiques.</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="reef-card mt-3">
+                    <div class="fw-semibold mb-2">⛲ Configuration des pompes</div>
+                    <p class="small text-secondary mb-3">Nom, volume (mL) et sens de rotation sont sauvegardés côté
+                        serveur.</p>
+                    <div class="row g-3">
+                        {% for axis in ["X","Y","Z","E"] %}
+                        <div class="col-md-6">
+                            <div class="border rounded p-2 h-100">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <div class="small fw-semibold">Pompe {{ axis }}</div>
+                                    <button class="btn btn-sm btn-outline-light" type="button"
+                                        data-action="editPumpName" data-axis="{{ axis }}">✎</button>
+                                </div>
+                                <div class="mb-2">
+                                    <input id="pumpName_{{ axis }}" class="form-control form-control-sm"
+                                        placeholder="Pompe {{ axis }}" disabled />
+                                </div>
+                                <div class="row g-2">
+                                    <div class="col-6">
+                                        <label class="form-label small">Volume (mL)</label>
+                                        <input id="pumpVolume_{{ axis }}" type="number" step="0.1" min="0"
+                                            class="form-control form-control-sm" />
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="form-label small">Sens</label>
+                                        <select id="pumpDir_{{ axis }}" class="form-select form-select-sm">
+                                            <option value="1">Avant (+)</option>
+                                            <option value="-1">Arrière (-)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="d-grid mt-2">
+                                    <button class="btn btn-sm btn-aqua" data-action="pumpSave"
+                                        data-axis="{{ axis }}">Enregistrer</button>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+
+
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+
+</html>
