@@ -88,10 +88,6 @@
                                     <div class="temp-small text-secondary" id="ta_label">Air</div>
                                 </div>
                                 <div class="col-12">
-                                    <div class="temp-main" id="tx_val">--.-°C</div>
-                                    <div class="temp-small text-secondary" id="tx_label">Aux</div>
-                                </div>
-                                <div class="col-6 mb-2">
                                     <div class="temp-main" id="tymin_val">--.-°C</div>
                                     <div class="temp-small text-secondary" id="tymin_label">Y-Min</div>
                                 </div>
@@ -243,47 +239,14 @@
                             data-action="heatPower">Éteindre</button>
                     </div>
                 </div>
-
-                <div class="reef-card">
-                    <div class="fw-semibold mb-3">⚙️ PID</div>
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <div class="section-title mb-2">Eau</div>
-                            <div class="row g-2">
-                                <div class="col-4">
-                                    <label class="form-label small">P</label>
-                                    <input id="pidwP" type="number" step="0.1" class="form-control form-control-sm" />
-                                </div>
-                                <div class="col-4">
-                                    <label class="form-label small">I</label>
-                                    <input id="pidwI" type="number" step="0.01" class="form-control form-control-sm" />
-                                </div>
-                                <div class="col-4">
-                                    <label class="form-label small">D</label>
-                                    <input id="pidwD" type="number" step="0.1" class="form-control form-control-sm" />
-                                </div>
-                            </div>
-                            <button class="btn btn-sm btn-aqua mt-2" data-action="applyPIDWater">Appliquer</button>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="section-title mb-2">Réserve</div>
-                            <div class="row g-2">
-                                <div class="col-4">
-                                    <label class="form-label small">P</label>
-                                    <input id="pidrP" type="number" step="0.1" class="form-control form-control-sm" />
-                                </div>
-                                <div class="col-4">
-                                    <label class="form-label small">I</label>
-                                    <input id="pidrI" type="number" step="0.01" class="form-control form-control-sm" />
-                                </div>
-                                <div class="col-4">
-                                    <label class="form-label small">D</label>
-                                    <input id="pidrD" type="number" step="0.1" class="form-control form-control-sm" />
-                                </div>
-                            </div>
-                            <button class="btn btn-sm btn-aqua mt-2" data-action="applyPIDRes">Appliquer</button>
-                        </div>
+                <div class="reef-card mb-3">
+                    <div class="fw-semibold mb-2">Hystérésis (deadband)</div>
+                    <div class="input-group input-group-sm" style="max-width: 220px;">
+                        <span class="input-group-text">± °C</span>
+                        <input id="heatHyst" type="number" step="0.05" min="0" class="form-control" />
+                        <button class="btn btn-aqua" data-action="applyHeatHyst">Enregistrer</button>
                     </div>
+                    <small class="text-secondary">Appliqué autour de la consigne eau (ex: ±0,3°C).</small>
                 </div>
                 <div class="reef-card mb-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
@@ -454,10 +417,6 @@
                         <div class="col-md-4">
                             <label class="form-label small">Air</label>
                             <input id="tempName_air" class="form-control form-control-sm" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Aux</label>
-                            <input id="tempName_aux" class="form-control form-control-sm" />
                         </div>
                         <div class="col-md-4">
                             <label class="form-label small">Y-Min</label>

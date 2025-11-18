@@ -141,11 +141,9 @@ class ReefController:
         self.state: Dict[str, Any] = {
             "tw": "--.-",
             "ta": "--.-",
-            "tx": "--.-",
             "tset_water": 25.0,
             "tset_res": 30.0,
-            "pidw": (12.0, 0.4, 60.0),
-            "pidr": (12.0, 0.4, 60.0),
+            "heat_hyst": 0.3,
             "auto_fan": True,
             "auto_thresh": 28.0,
             "fan": 0,
@@ -178,7 +176,6 @@ class ReefController:
             "temp_names": {
                 "water": "Eau",
                 "air": "Air",
-                "aux": "Aux",
                 "ymin": "Y-Min",
                 "ymax": "Y-Max",
             },
@@ -289,6 +286,11 @@ class ReefController:
                         self.state["heat_enabled"] = bool(data["enabled"])
                     if "state" in data:
                         self.state["heat_state"].update(data["state"])
+                    if "hyst" in data:
+                        try:
+                            self.state["heat_hyst"] = float(data["hyst"])
+                        except Exception:
+                            pass
             except Exception as exc:
                 logger.error("Unable to read heat config: %s", exc)
 
@@ -299,6 +301,7 @@ class ReefController:
                 "auto": self.state.get("heat_auto", True),
                 "enabled": self.state.get("heat_enabled", True),
                 "state": self.state.get("heat_state", {}),
+                "hyst": self.state.get("heat_hyst", 0.3),
             }
         try:
             HEAT_CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -636,10 +639,6 @@ class ReefController:
                     self.state["ta"] = self._sanitize_temp_text(
                         value, self.state.get("ta", "--.-")
                     )
-                elif key == "tempaux":
-                    self.state["tx"] = self._sanitize_temp_text(
-                        value, self.state.get("tx", "--.-")
-                    )
                 elif key == "tempymin":
                     self.state["ty_min"] = self._sanitize_temp_text(
                         value, self.state.get("ty_min", "--.-")
@@ -679,9 +678,6 @@ class ReefController:
             )
             self.state["ta"] = self._sanitize_temp_text(
                 vals.get("t_air"), self.state.get("ta", "--.-")
-            )
-            self.state["tx"] = self._sanitize_temp_text(
-                vals.get("t_aux"), self.state.get("tx", "--.-")
             )
             self.state["ty_min"] = self._sanitize_temp_text(
                 vals.get("t_ymin"), self.state.get("ty_min", "--.-")
@@ -737,7 +733,7 @@ class ReefController:
         cmd_water = targets.get("water", 0.0) if states.get("water") else 0.0
         cmd_res = targets.get("reserve", 0.0) if states.get("reserve") else 0.0
         # Pilotage via relais GPIO (NC) : ON si une zone chauffe
-        heat_on = cmd_water > 0 or cmd_res > 0
+        heat_on = cmd_water > 0  # seule l'eau décide du relais
         self._drive_heat_gpio(heat_on)
 
     def _parse_temperature_value(self, raw: Any) -> Optional[float]:
@@ -762,7 +758,7 @@ class ReefController:
                 "reserve": self.state.get("ty_max"),
             }
             states = self.state.get("heat_state", {}).copy()
-        hysteresis = 0.2
+        hysteresis = float(self.state.get("heat_hyst", 0.3) or 0.3)
         updated = False
         for zone, temp_raw in temps.items():
             target = float(targets.get(zone, 0) or 0)
@@ -786,6 +782,12 @@ class ReefController:
                 self.state["heat_enabled"] = any(states.values())
             self._save_heat_config()
             self._update_heater_outputs()
+
+    def set_heat_hyst(self, value: float) -> None:
+        with self.state_lock:
+            self.state["heat_hyst"] = value
+        self._save_heat_config()
+        self._evaluate_heat_needs()
 
     def _sanitize_temp_text(self, raw: Any, fallback: str) -> str:
         try:
@@ -860,16 +862,6 @@ class ReefController:
             self._evaluate_heat_needs()
         else:
             self._update_heater_outputs()
-
-    def apply_pid_water(self, p: float, i: float, d: float) -> None:
-        with self.state_lock:
-            self.state["pidw"] = (p, i, d)
-        self._send_command(f"PIDW P{p}I{i}D{d}")
-
-    def apply_pid_res(self, p: float, i: float, d: float) -> None:
-        with self.state_lock:
-            self.state["pidr"] = (p, i, d)
-        self._send_command(f"PIDR P{p}I{i}D{d}")
 
     def set_autocool(self, thresh: float) -> None:
         with self.state_lock:

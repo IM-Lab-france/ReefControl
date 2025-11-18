@@ -39,16 +39,14 @@ def api_action():
             controller.set_water(float(params["t"]))
         elif action == "set_reserve":
             controller.set_reserve(float(params["t"]))
-        elif action == "pid_water":
-            controller.apply_pid_water(float(params["P"]), float(params["I"]), float(params["D"]))
-        elif action == "pid_reserve":
-            controller.apply_pid_res(float(params["P"]), float(params["I"]), float(params["D"]))
         elif action == "auto_fan":
             controller.set_auto_fan(bool(params.get("auto")))
         elif action == "fan_manual":
             controller.set_fan_manual(int(params.get("value", 0)))
         elif action == "set_autocool":
             controller.set_autocool(float(params.get("thresh", 28)))
+        elif action == "set_heat_hyst":
+            controller.set_heat_hyst(float(params.get("value", 0.3)))
         elif action == "protect":
             controller.toggle_protect(bool(params.get("enable", False)))
         elif action == "servo":

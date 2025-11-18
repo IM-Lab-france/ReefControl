@@ -19,6 +19,7 @@ let currentFanOn = false;
 let refreshIntervalMs = 5000;
 let loaderTimer = null;
 let nextRefreshAt = 0;
+let inputsInitialized = false;
 
 async function apiAction(action, params = {}) {
   try {
@@ -109,19 +110,9 @@ function applyRes() {
   apiAction("set_reserve", { t: value });
 }
 
-function applyPIDWater() {
-  const P = parseFloat(document.getElementById("pidwP").value || "0");
-  const I = parseFloat(document.getElementById("pidwI").value || "0");
-  const D = parseFloat(document.getElementById("pidwD").value || "0");
-  apiAction("pid_water", { P, I, D });
-}
+function applyPIDWater() {}
 
-function applyPIDRes() {
-  const P = parseFloat(document.getElementById("pidrP").value || "0");
-  const I = parseFloat(document.getElementById("pidrI").value || "0");
-  const D = parseFloat(document.getElementById("pidrD").value || "0");
-  apiAction("pid_reserve", { P, I, D });
-}
+function applyPIDRes() {}
 
 function onAutoFanToggle() {
   const auto = document.getElementById("autoFanChk").checked;
@@ -286,7 +277,6 @@ function applyStateToUI(state) {
 
   document.getElementById("tw_val").textContent = `${state.tw || "--.-"}°C`;
   document.getElementById("ta_val").textContent = `${state.ta || "--.-"}°C`;
-  document.getElementById("tx_val").textContent = `${state.tx || "--.-"}°C`;
   document.getElementById("tymin_val").textContent = `${
     state.ty_min || "--.-"
   }°C`;
@@ -310,7 +300,6 @@ function applyStateToUI(state) {
   };
   mirrorLabel("tw_label", tname("water", "Eau"));
   mirrorLabel("ta_label", tname("air", "Air"));
-  mirrorLabel("tx_label", tname("aux", "Aux"));
   mirrorLabel("tymin_label", tname("ymin", "Y-Min"));
   mirrorLabel("tymax_label", tname("ymax", "Y-Max"));
   mirrorLabel("tymin_label2", tname("ymin", "Y-Min"));
@@ -331,12 +320,14 @@ function applyStateToUI(state) {
     pumpBtn.classList.toggle("btn-danger", !state.pump_state);
     pumpBtn.classList.toggle("btn-outline-light", state.pump_state);
   }
-  setInputValue("tempName_water", tname("water", "Eau"));
-  setInputValue("tempName_air", tname("air", "Air"));
-  setInputValue("tempName_aux", tname("aux", "Aux"));
-  setInputValue("tempName_ymin", tname("ymin", "Y-Min"));
-  setInputValue("tempName_ymax", tname("ymax", "Y-Max"));
-  setInputValue("refreshInterval", (refreshIntervalMs / 1000).toString());
+  if (!inputsInitialized) {
+    setInputValue("tempName_water", tname("water", "Eau"));
+    setInputValue("tempName_air", tname("air", "Air"));
+    setInputValue("tempName_ymin", tname("ymin", "Y-Min"));
+    setInputValue("tempName_ymax", tname("ymax", "Y-Max"));
+    setInputValue("heatHyst", state.heat_hyst ?? 0.3);
+    setInputValue("refreshInterval", (refreshIntervalMs / 1000).toString());
+  }
   const heatTargets = state.heat_targets || {};
   document.getElementById("tset_water_label").textContent = `${
     heatTargets.water ?? state.tset_water ?? "--.-"
@@ -344,15 +335,11 @@ function applyStateToUI(state) {
   document.getElementById("tset_res_label").textContent = `${
     heatTargets.reserve ?? state.tset_res ?? "--.-"
   }°C`;
-  setInputIfIdle("tset_water2", heatTargets.water ?? state.tset_water ?? "");
-  setInputIfIdle("tset_res2", heatTargets.reserve ?? state.tset_res ?? "");
+  if (!inputsInitialized) {
+    setInputIfIdle("tset_water2", heatTargets.water ?? state.tset_water ?? "");
+    setInputIfIdle("tset_res2", heatTargets.reserve ?? state.tset_res ?? "");
+  }
 
-  document.getElementById("pidwP").value = state.pidw?.[0] ?? 0;
-  document.getElementById("pidwI").value = state.pidw?.[1] ?? 0;
-  document.getElementById("pidwD").value = state.pidw?.[2] ?? 0;
-  document.getElementById("pidrP").value = state.pidr?.[0] ?? 0;
-  document.getElementById("pidrI").value = state.pidr?.[1] ?? 0;
-  document.getElementById("pidrD").value = state.pidr?.[2] ?? 0;
 
   document.getElementById("autoFanChk").checked = !!state.auto_fan;
   document.getElementById("autoFanModeBadge").textContent = state.auto_fan
@@ -394,7 +381,9 @@ function applyStateToUI(state) {
   }
 
   document.getElementById("mtrAutoChk").checked = !!state.mtr_auto_off;
-  document.getElementById("servoAngle").value = state.servo_angle ?? 10;
+  if (!inputsInitialized) {
+    document.getElementById("servoAngle").value = state.servo_angle ?? 10;
+  }
 
   currentLightState = !!state.light_state;
   currentLightAuto = !!state.light_auto;
@@ -403,6 +392,7 @@ function applyStateToUI(state) {
   currentHeatAuto = !!state.heat_auto;
   currentHeatEnabled = !!state.heat_enabled;
   updateHeatUI();
+  inputsInitialized = true;
 }
 
 function applyLevelBadge(id, val, okWhenOne) {
@@ -505,6 +495,7 @@ function updateHeatUI() {
 
 function setInputIfIdle(id, value) {
   const input = document.getElementById(id);
+  if (inputsInitialized) return;
   if (input && !input.matches(":focus")) {
     input.value = value ?? "";
   }
@@ -512,6 +503,7 @@ function setInputIfIdle(id, value) {
 
 function setInputValue(id, value) {
   const input = document.getElementById(id);
+  if (inputsInitialized) return;
   if (input) {
     input.value = value ?? "";
   }
@@ -567,6 +559,16 @@ async function toggleFanManual(forceState) {
   refreshState();
 }
 
+async function applyHeatHyst() {
+  const val = parseFloat(document.getElementById("heatHyst")?.value || "");
+  if (!isFinite(val) || val < 0) {
+    alert("Hystérésis invalide");
+    return;
+  }
+  await apiAction("set_heat_hyst", { value: val });
+  refreshState();
+}
+
 function applyRefreshInterval() {
   const val = parseFloat(
     document.getElementById("refreshInterval")?.value || ""
@@ -596,8 +598,6 @@ const clickHandlers = {
   pumpGo: (el) => pumpGo(el.dataset.axis),
   applyWater: () => applyWater(),
   applyRes: () => applyRes(),
-  applyPIDWater: () => applyPIDWater(),
-  applyPIDRes: () => applyPIDRes(),
   applyGlobalSpeed: () => applyGlobalSpeed(),
   editPumpName: (el) => enablePumpNameEdit(el.dataset.axis),
   pumpSave: (el) => savePumpConfig(el.dataset.axis),
@@ -608,6 +608,7 @@ const clickHandlers = {
   togglePump: () => togglePump(),
   saveTempNames: () => saveTempNames(),
   applyRefreshInterval: () => applyRefreshInterval(),
+  applyHeatHyst: () => applyHeatHyst(),
 };
 
 const changeHandlers = {
