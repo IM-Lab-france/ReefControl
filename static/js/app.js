@@ -7,6 +7,7 @@ let currentLightAuto = true;
 let globalSpeedUs = 300;
 let currentHeatAuto = true;
 let currentHeatEnabled = true;
+let currentFanOn = false;
 
 async function apiAction(action, params = {}) {
     try {
@@ -105,13 +106,6 @@ function applyPIDRes() {
 function onAutoFanToggle() {
     const auto = document.getElementById("autoFanChk").checked;
     apiAction("auto_fan", { auto });
-}
-
-function onFanChange(value) {
-    const val = parseInt(value, 10) || 0;
-    document.getElementById("fan_val").textContent = val;
-    document.getElementById("fanSlider").value = val;
-    apiAction("fan_manual", { value: val });
 }
 
 function applyAutocool() {
@@ -267,6 +261,12 @@ function applyStateToUI(state) {
     document.getElementById("tx_val").textContent = `${state.tx || "--.-"}°C`;
     document.getElementById("tymin_val").textContent = `${state.ty_min || "--.-"}°C`;
     document.getElementById("tymax_val").textContent = `${state.ty_max || "--.-"}°C`;
+    const phV = state.ph_v ?? state.phV ?? null;
+    const phRaw = state.ph_raw ?? state.phRaw ?? null;
+    document.getElementById("ph_v_val").textContent = phV !== null && phV !== undefined ? `${phV} V` : "--.- V";
+    document.getElementById("ph_raw_val").textContent = phRaw !== null && phRaw !== undefined ? phRaw : "----";
+    const phVal = state.ph ?? null;
+    document.getElementById("ph_val").textContent = phVal !== null && phVal !== undefined ? phVal : "--.-";
     const tempNames = state.temp_names || {};
     const tname = (k, d) => tempNames[k] || d;
     const mirrorLabel = (id, val) => {
@@ -286,15 +286,20 @@ function applyStateToUI(state) {
     };
     mirrorVal("tymin_val2", state.ty_min);
     mirrorVal("tymax_val2", state.ty_max);
+    const pumpLabel = document.getElementById("pumpStateLabel");
+    const pumpBtn = document.getElementById("pumpToggleBtn");
+    if (pumpLabel) pumpLabel.textContent = state.pump_state ? "Pompe OFF" : "Pompe On";
+    if (pumpBtn) {
+        // Relais OFF (pump_state=false) -> label "Pompe On", bouton "Arrêter"
+        pumpBtn.textContent = state.pump_state ? "Démarrer" : "Arrêter";
+        pumpBtn.classList.toggle("btn-danger", !state.pump_state);
+        pumpBtn.classList.toggle("btn-outline-light", state.pump_state);
+    }
     setInputIfIdle("tempName_water", tname("water", "Eau"));
     setInputIfIdle("tempName_air", tname("air", "Air"));
     setInputIfIdle("tempName_aux", tname("aux", "Aux"));
     setInputIfIdle("tempName_ymin", tname("ymin", "Y-Min"));
     setInputIfIdle("tempName_ymax", tname("ymax", "Y-Max"));
-    const phV = state.ph_v ?? state.phV ?? null;
-    const phRaw = state.ph_raw ?? state.phRaw ?? null;
-    document.getElementById("ph_v_val").textContent = phV !== null && phV !== undefined ? `${phV} V` : "--.- V";
-    document.getElementById("ph_raw_val").textContent = phRaw !== null && phRaw !== undefined ? phRaw : "----";
     const heatTargets = state.heat_targets || {};
     document.getElementById("tset_water_label").textContent = `${heatTargets.water ?? state.tset_water ?? "--.-"}°C`;
     document.getElementById("tset_res_label").textContent = `${heatTargets.reserve ?? state.tset_res ?? "--.-"}°C`;
@@ -312,8 +317,14 @@ function applyStateToUI(state) {
     document.getElementById("autoFanModeBadge").textContent = state.auto_fan ? "Auto" : "Manuel";
     document.getElementById("auto_thresh").value = state.auto_thresh ?? 28;
     document.getElementById("auto_thresh_label").textContent = state.auto_thresh ?? "--.-";
-    document.getElementById("fan_val").textContent = state.fan ?? 0;
-    document.getElementById("fanSlider").value = state.fan ?? 0;
+    currentFanOn = !!state.fan_on;
+    const fanBtn = document.getElementById("fanToggleBtn");
+    if (fanBtn) {
+        fanBtn.textContent = currentFanOn ? "Arrêter" : "Allumer";
+        fanBtn.classList.toggle("btn-danger", currentFanOn);
+        fanBtn.classList.toggle("btn-outline-light", !currentFanOn);
+        fanBtn.disabled = !!state.auto_fan;
+    }
 
     applyLevelBadge("lvl_low", state.lvl_low, false);
     applyLevelBadge("lvl_high", state.lvl_high, true);
@@ -464,6 +475,26 @@ async function saveTempNames() {
     refreshState();
 }
 
+async function togglePump(forceState) {
+    const params = {};
+    if (typeof forceState === "boolean") {
+        params.state = forceState;
+    }
+    await apiAction("toggle_pump", params);
+    refreshState();
+}
+
+async function toggleFanManual(forceState) {
+    const params = {};
+    if (typeof forceState === "boolean") {
+        params.value = forceState ? 1 : 0;
+    } else {
+        params.value = currentFanOn ? 0 : 1;
+    }
+    await apiAction("fan_manual", params);
+    refreshState();
+}
+
 const clickHandlers = {
     refreshPorts: () => refreshPorts(),
     connect: () => connect(),
@@ -489,6 +520,8 @@ const clickHandlers = {
     saveLightSchedule: (el) => saveLightSchedule(el.dataset.day),
     toggleLight: () => toggleLight(),
     heatPower: () => toggleHeatPower(),
+    fanToggle: () => toggleFanManual(),
+    togglePump: () => togglePump(),
 };
 
 const changeHandlers = {
@@ -520,13 +553,6 @@ function initDelegates() {
         handler(target);
     });
 
-    document.addEventListener("input", (event) => {
-        const target = event.target instanceof Element ? event.target : null;
-        if (!target) return;
-        if (target.dataset.input === "fanSlider") {
-            onFanChange(target.value);
-        }
-    });
 }
 
 function init() {

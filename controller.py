@@ -20,6 +20,9 @@ HANDSHAKE_TIMEOUT = 4.0
 PUMP_CONFIG_PATH = Path("pump_config.json")
 LIGHT_SCHEDULE_PATH = Path("light_schedule.json")
 HEAT_CONFIG_PATH = Path("heat_config.json")
+PUMP_GPIO_PIN = 22
+FAN_GPIO_PIN = 23
+HEAT_GPIO_PIN = 24  # relais chauffe eau
 TEMP_NAMES_PATH = Path("temp_names.json")
 LIGHT_GPIO_PIN = 27
 LIGHT_DAY_KEYS = [
@@ -31,7 +34,6 @@ LIGHT_DAY_KEYS = [
     "saturday",
     "sunday",
 ]
-LIGHT_GPIO_PIN = 27
 
 logger = logging.getLogger("reef.controller")
 logger.setLevel(logging.INFO)
@@ -62,8 +64,12 @@ class SerialClient:
         self._ser = serial.Serial(port, BAUDRATE, timeout=0.2)
         time.sleep(1.5)
         try:
-            hello_line = self._handshake("HELLO?", lambda l: l.startswith("HELLO OK"), "HELLO")
-            status_line = self._handshake("STATUS?", lambda l: l.startswith("STATUS;"), "STATUS")
+            hello_line = self._handshake(
+                "HELLO?", lambda l: l.startswith("HELLO OK"), "HELLO"
+            )
+            status_line = self._handshake(
+                "STATUS?", lambda l: l.startswith("STATUS;"), "STATUS"
+            )
         except Exception:
             self.close()
             raise
@@ -72,7 +78,9 @@ class SerialClient:
         self._reader.start()
         return hello_line, status_line
 
-    def _handshake(self, command: str, predicate: Callable[[str], bool], label: str) -> str:
+    def _handshake(
+        self, command: str, predicate: Callable[[str], bool], label: str
+    ) -> str:
         assert self._ser is not None
         deadline = time.time() + HANDSHAKE_TIMEOUT
         self._write(command)
@@ -154,8 +162,7 @@ class ReefController:
             "light_state": False,
             "light_auto": True,
             "light_schedule": {
-                day: {"on": "08:00", "off": "20:00"}
-                for day in LIGHT_DAY_KEYS
+                day: {"on": "08:00", "off": "20:00"} for day in LIGHT_DAY_KEYS
             },
             "heat_targets": {"water": 25.0, "reserve": 30.0},
             "heat_auto": True,
@@ -163,8 +170,11 @@ class ReefController:
             "heat_state": {"water": True, "reserve": True},
             "ph_v": None,
             "ph_raw": None,
+            "ph": None,
             "ty_min": "--.-",
             "ty_max": "--.-",
+            "pump_state": False,
+            "fan_on": False,
             "temp_names": {
                 "water": "Eau",
                 "air": "Air",
@@ -181,19 +191,34 @@ class ReefController:
         self._load_heat_config()
         self._load_temp_names()
         self.light_gpio_ready = False
+        self.pump_gpio_ready = False
+        self.fan_gpio_ready = False
+        self.heat_gpio_ready = False
         self._init_light_gpio()
+        self._init_pump_gpio()
+        self._init_fan_gpio()
+        self._init_heat_gpio()
+        self._drive_pump_gpio(self.state.get("pump_state", False))
+        self._drive_fan_gpio(self.state.get("fan", 0) > 0)
+        self._drive_heat_gpio(self.state.get("heat_enabled", False))
         self._last_temp_query = 0.0
         self._last_level_query = 0.0
-        self.light_scheduler = threading.Thread(target=self._light_scheduler_loop, daemon=True)
+        self.light_scheduler = threading.Thread(
+            target=self._light_scheduler_loop, daemon=True
+        )
         self.light_scheduler.start()
-        self.telemetry_thread = threading.Thread(target=self._telemetry_loop, daemon=True)
+        self.telemetry_thread = threading.Thread(
+            target=self._telemetry_loop, daemon=True
+        )
         self.telemetry_thread.start()
 
     # ---------- Config ----------
     def _load_configs(self) -> None:
         if PUMP_CONFIG_PATH.exists():
             try:
-                self.state["pump_config"] = json.loads(PUMP_CONFIG_PATH.read_text("utf-8"))
+                self.state["pump_config"] = json.loads(
+                    PUMP_CONFIG_PATH.read_text("utf-8")
+                )
             except Exception:
                 self.state["pump_config"] = {}
         else:
@@ -201,20 +226,30 @@ class ReefController:
 
         if LIGHT_SCHEDULE_PATH.exists():
             try:
-                self.state["light_schedule"] = json.loads(LIGHT_SCHEDULE_PATH.read_text("utf-8"))
+                self.state["light_schedule"] = json.loads(
+                    LIGHT_SCHEDULE_PATH.read_text("utf-8")
+                )
             except Exception:
                 pass
         self._load_temp_names()
+        # Fan state is GPIO-only now; ensure auto_fan defaults and fan_on coherence
+        with self.state_lock:
+            self.state["auto_fan"] = True
+            self.state["fan_on"] = False
 
     def _save_pump_config(self) -> None:
         try:
-            PUMP_CONFIG_PATH.write_text(json.dumps(self.state["pump_config"], indent=2), encoding="utf-8")
+            PUMP_CONFIG_PATH.write_text(
+                json.dumps(self.state["pump_config"], indent=2), encoding="utf-8"
+            )
         except Exception as exc:
             logger.error("Unable to save pump config: %s", exc)
 
     def _save_light_schedule(self) -> None:
         try:
-            LIGHT_SCHEDULE_PATH.write_text(json.dumps(self.state["light_schedule"], indent=2), encoding="utf-8")
+            LIGHT_SCHEDULE_PATH.write_text(
+                json.dumps(self.state["light_schedule"], indent=2), encoding="utf-8"
+            )
         except Exception as exc:
             logger.error("Unable to save light schedule: %s", exc)
 
@@ -229,7 +264,9 @@ class ReefController:
 
     def _save_temp_names(self) -> None:
         try:
-            TEMP_NAMES_PATH.write_text(json.dumps(self.state.get("temp_names", {}), indent=2), encoding="utf-8")
+            TEMP_NAMES_PATH.write_text(
+                json.dumps(self.state.get("temp_names", {}), indent=2), encoding="utf-8"
+            )
         except Exception as exc:
             logger.error("Unable to save temp names: %s", exc)
 
@@ -240,8 +277,12 @@ class ReefController:
                 with self.state_lock:
                     if "targets" in data:
                         self.state["heat_targets"].update(data["targets"])
-                        self.state["tset_water"] = self.state["heat_targets"].get("water", self.state["tset_water"])
-                        self.state["tset_res"] = self.state["heat_targets"].get("reserve", self.state["tset_res"])
+                        self.state["tset_water"] = self.state["heat_targets"].get(
+                            "water", self.state["tset_water"]
+                        )
+                        self.state["tset_res"] = self.state["heat_targets"].get(
+                            "reserve", self.state["tset_res"]
+                        )
                     if "auto" in data:
                         self.state["heat_auto"] = bool(data["auto"])
                     if "enabled" in data:
@@ -316,6 +357,112 @@ class ReefController:
             self.light_gpio_ready = False
             logger.warning("Unable to configure GPIO %s: %s", LIGHT_GPIO_PIN, exc)
 
+    def _init_pump_gpio(self) -> None:
+        if GPIO is None:
+            logger.debug("RPi.GPIO not available; pump relay disabled")
+            self.pump_gpio_ready = False
+            return
+        try:
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(
+                PUMP_GPIO_PIN, GPIO.OUT, initial=GPIO.HIGH
+            )  # NC contact: HIGH = ouvert = pompe OFF
+            self.pump_gpio_ready = True
+            logger.info("Pump relay configured on GPIO %s", PUMP_GPIO_PIN)
+        except Exception as exc:
+            self.pump_gpio_ready = False
+            logger.warning("Unable to configure pump GPIO %s: %s", PUMP_GPIO_PIN, exc)
+
+    def _drive_pump_gpio(self, enabled: bool) -> None:
+        if not self.pump_gpio_ready or GPIO is None:
+            return
+        try:
+            # NC câblé : pompe ON quand relais relâché (niveau haut). On choisit enabled=True <=> pompe ON.
+            GPIO.output(PUMP_GPIO_PIN, GPIO.LOW if enabled else GPIO.HIGH)
+        except Exception as exc:
+            logger.error("Pump relay write failed: %s", exc)
+            self.pump_gpio_ready = False
+
+    def _init_heat_gpio(self) -> None:
+        if GPIO is None:
+            logger.debug("RPi.GPIO not available; heat relay disabled")
+            self.heat_gpio_ready = False
+            return
+        try:
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(HEAT_GPIO_PIN, GPIO.OUT, initial=GPIO.HIGH)  # relais NC
+            self.heat_gpio_ready = True
+            logger.info("Heat relay configured on GPIO %s", HEAT_GPIO_PIN)
+        except Exception as exc:
+            self.heat_gpio_ready = False
+            logger.warning("Unable to configure heat GPIO %s: %s", HEAT_GPIO_PIN, exc)
+
+    def _drive_heat_gpio(self, enabled: bool) -> None:
+        if not self.heat_gpio_ready or GPIO is None:
+            return
+        try:
+            GPIO.output(HEAT_GPIO_PIN, GPIO.LOW if enabled else GPIO.HIGH)
+        except Exception as exc:
+            logger.error("Heat relay write failed: %s", exc)
+            self.heat_gpio_ready = False
+
+    def _init_fan_gpio(self) -> None:
+        if GPIO is None:
+            logger.debug("RPi.GPIO not available; fan relay disabled")
+            self.fan_gpio_ready = False
+            return
+        try:
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(
+                FAN_GPIO_PIN, GPIO.OUT, initial=GPIO.HIGH
+            )  # default OFF (inversé)
+            self.fan_gpio_ready = True
+            logger.info("Fan relay configured on GPIO %s", FAN_GPIO_PIN)
+        except Exception as exc:
+            self.fan_gpio_ready = False
+            logger.warning("Unable to configure fan GPIO %s: %s", FAN_GPIO_PIN, exc)
+
+    def _drive_fan_gpio(self, enabled: bool) -> None:
+        if not self.fan_gpio_ready or GPIO is None:
+            return
+        try:
+            # Inversé : LOW = ventilateur ON (relais NC), HIGH = OFF
+            GPIO.output(FAN_GPIO_PIN, GPIO.LOW if enabled else GPIO.HIGH)
+        except Exception as exc:
+            logger.error("Fan relay write failed: %s", exc)
+            self.fan_gpio_ready = False
+
+    def _evaluate_fan(self) -> None:
+        with self.state_lock:
+            auto = self.state.get("auto_fan", True)
+            thresh = float(self.state.get("auto_thresh", 28.0) or 28.0)
+            current = self.state.get("fan_on", False)
+            t_water = self.state.get("tw")
+        if not auto:
+            # Manual mode: do nothing here
+            return
+        temp_val = self._parse_temperature_value(t_water)
+        desired = False
+        if temp_val is not None and temp_val >= thresh:
+            desired = True
+        if desired != current:
+            with self.state_lock:
+                self.state["fan_on"] = desired
+                self.state["fan"] = 255 if desired else 0
+            self._drive_fan_gpio(desired)
+
+    def toggle_pump(self, state: Optional[bool] = None) -> None:
+        with self.state_lock:
+            if state is None:
+                new_state = not self.state.get("pump_state", False)
+            else:
+                new_state = bool(state)
+            self.state["pump_state"] = new_state
+        self._drive_pump_gpio(new_state)
+
     def _drive_light_gpio(self, enabled: bool) -> None:
         if not self.light_gpio_ready or GPIO is None:
             return
@@ -350,6 +497,7 @@ class ReefController:
                             self.read_levels_once()
                         except Exception as exc:
                             logger.debug("LEVEL? query failed: %s", exc)
+                    self._evaluate_fan()
                 time.sleep(1.0)
             except Exception as exc:
                 logger.error("Telemetry loop error: %s", exc)
@@ -435,7 +583,12 @@ class ReefController:
         else:
             code = "UNKNOWN"
             message = line
-        return {"code": code, "message": message.strip(), "raw": line, "ts": time.time()}
+        return {
+            "code": code,
+            "message": message.strip(),
+            "raw": line,
+            "ts": time.time(),
+        }
 
     def _apply_status_line(self, payload: str) -> None:
         entries = payload.split(";") if payload else []
@@ -449,7 +602,9 @@ class ReefController:
                     self.state["motors_powered"] = value in ("1", "ON", "TRUE")
                 elif key == "fan_val":
                     try:
-                        self.state["fan"] = int(float(value))
+                        val = int(float(value))
+                        self.state["fan"] = val
+                        self.state["fan_on"] = val > 0
                     except ValueError:
                         pass
                 elif key == "auto_thresh":
@@ -474,18 +629,29 @@ class ReefController:
                 elif key == "level_alert":
                     self.state["lvl_alert"] = value
                 elif key == "tempw":
-                    self.state["tw"] = self._sanitize_temp_text(value, self.state.get("tw", "--.-"))
+                    self.state["tw"] = self._sanitize_temp_text(
+                        value, self.state.get("tw", "--.-")
+                    )
                 elif key == "tempa":
-                    self.state["ta"] = self._sanitize_temp_text(value, self.state.get("ta", "--.-"))
+                    self.state["ta"] = self._sanitize_temp_text(
+                        value, self.state.get("ta", "--.-")
+                    )
                 elif key == "tempaux":
-                    self.state["tx"] = self._sanitize_temp_text(value, self.state.get("tx", "--.-"))
+                    self.state["tx"] = self._sanitize_temp_text(
+                        value, self.state.get("tx", "--.-")
+                    )
                 elif key == "tempymin":
-                    self.state["ty_min"] = self._sanitize_temp_text(value, self.state.get("ty_min", "--.-"))
+                    self.state["ty_min"] = self._sanitize_temp_text(
+                        value, self.state.get("ty_min", "--.-")
+                    )
                 elif key == "tempymax":
-                    self.state["ty_max"] = self._sanitize_temp_text(value, self.state.get("ty_max", "--.-"))
+                    self.state["ty_max"] = self._sanitize_temp_text(
+                        value, self.state.get("ty_max", "--.-")
+                    )
                 elif key == "ph_v":
                     try:
                         self.state["ph_v"] = float(value)
+                        self.state["ph"] = self._ph_from_voltage(self.state["ph_v"])
                     except ValueError:
                         pass
                 elif key == "ph_raw":
@@ -508,20 +674,34 @@ class ReefController:
                 k, v = part.split(":", 1)
                 vals[k.strip().lower()] = v.strip()
         with self.state_lock:
-            self.state["tw"] = self._sanitize_temp_text(vals.get("t_water"), self.state.get("tw", "--.-"))
-            self.state["ta"] = self._sanitize_temp_text(vals.get("t_air"), self.state.get("ta", "--.-"))
-            self.state["tx"] = self._sanitize_temp_text(vals.get("t_aux"), self.state.get("tx", "--.-"))
-            self.state["ty_min"] = self._sanitize_temp_text(vals.get("t_ymin"), self.state.get("ty_min", "--.-"))
-            self.state["ty_max"] = self._sanitize_temp_text(vals.get("t_ymax"), self.state.get("ty_max", "--.-"))
+            self.state["tw"] = self._sanitize_temp_text(
+                vals.get("t_water"), self.state.get("tw", "--.-")
+            )
+            self.state["ta"] = self._sanitize_temp_text(
+                vals.get("t_air"), self.state.get("ta", "--.-")
+            )
+            self.state["tx"] = self._sanitize_temp_text(
+                vals.get("t_aux"), self.state.get("tx", "--.-")
+            )
+            self.state["ty_min"] = self._sanitize_temp_text(
+                vals.get("t_ymin"), self.state.get("ty_min", "--.-")
+            )
+            self.state["ty_max"] = self._sanitize_temp_text(
+                vals.get("t_ymax"), self.state.get("ty_max", "--.-")
+            )
             try:
                 self.state["ph_v"] = float(vals.get("ph_v", self.state.get("ph_v")))
+                self.state["ph"] = self._ph_from_voltage(self.state["ph_v"])
             except Exception:
                 pass
             try:
-                self.state["ph_raw"] = int(float(vals.get("ph_raw", self.state.get("ph_raw"))))
+                self.state["ph_raw"] = int(
+                    float(vals.get("ph_raw", self.state.get("ph_raw")))
+                )
             except Exception:
                 pass
         self._evaluate_heat_needs()
+        self._evaluate_fan()
 
     def _apply_level_line(self, line: str) -> None:
         tokens = line.replace("|", " ").split()
@@ -556,14 +736,9 @@ class ReefController:
             states = self.state.get("heat_state", {}).copy()
         cmd_water = targets.get("water", 0.0) if states.get("water") else 0.0
         cmd_res = targets.get("reserve", 0.0) if states.get("reserve") else 0.0
-        try:
-            self._send_command(f"HEATW {cmd_water:.2f}", timeout=1.0)
-        except Exception as exc:
-            logger.error("Failed to send HEATW: %s", exc)
-        try:
-            self._send_command(f"HEATR {cmd_res:.2f}", timeout=1.0)
-        except Exception as exc:
-            logger.error("Failed to send HEATR: %s", exc)
+        # Pilotage via relais GPIO (NC) : ON si une zone chauffe
+        heat_on = cmd_water > 0 or cmd_res > 0
+        self._drive_heat_gpio(heat_on)
 
     def _parse_temperature_value(self, raw: Any) -> Optional[float]:
         if raw is None:
@@ -620,6 +795,18 @@ class ReefController:
         except Exception:
             return fallback
 
+    def _ph_from_voltage(self, v: Optional[float]) -> Optional[float]:
+        """Approximate pH from PH-4502C voltage. Assumes 2.5 V at pH 7, ~0.18 V/pH."""
+        if v is None:
+            return None
+        try:
+            val = float(v)
+            if math.isnan(val) or math.isinf(val):
+                return None
+            return round(7.0 + (2.5 - val) / 0.18, 2)
+        except Exception:
+            return None
+
     def _send_query(self, command: str) -> None:
         if not self.connected:
             raise RuntimeError("Non connecté")
@@ -643,6 +830,8 @@ class ReefController:
         self._last_temp_query = 0.0
         self._last_level_query = 0.0
         self.status_text = "Déconnecté"
+        self._drive_heat_gpio(False)
+        self._drive_fan_gpio(False)
 
     # ---------- Actions exposed to API ----------
     def read_temps_once(self) -> None:
@@ -685,22 +874,26 @@ class ReefController:
         with self.state_lock:
             self.state["auto_thresh"] = thresh
             self.state["auto_fan"] = True
-        self._send_command(f"AUTOCOOL {thresh:.2f}")
-        self._send_command("FAN -1")
+        self._evaluate_fan()
 
     def set_fan_manual(self, value: int) -> None:
         with self.state_lock:
             self.state["auto_fan"] = False
-            self.state["fan"] = value
-        self._send_command(f"FAN {value}")
+            self.state["fan_on"] = bool(value)
+            self.state["fan"] = 255 if value else 0
+        self._drive_fan_gpio(bool(value))
 
     def set_auto_fan(self, enable: bool) -> None:
         if enable:
-            self.set_autocool(self.state["auto_thresh"])
+            with self.state_lock:
+                self.state["auto_fan"] = True
+            self._evaluate_fan()
         else:
             with self.state_lock:
                 self.state["auto_fan"] = False
-            self._send_command("FAN 0")
+                self.state["fan_on"] = False
+                self.state["fan"] = 0
+            self._drive_fan_gpio(False)
 
     def update_temp_names(self, names: Dict[str, str]) -> None:
         if not isinstance(names, dict):
@@ -770,7 +963,11 @@ class ReefController:
         signed_steps = -steps if backwards else steps
         self._send_command(f"PUMP {axis} {signed_steps} {max(speed, 50)}")
         if auto_off:
-            threading.Thread(target=self._auto_motor_off_delay, args=(abs(steps), max(speed, 50)), daemon=True).start()
+            threading.Thread(
+                target=self._auto_motor_off_delay,
+                args=(abs(steps), max(speed, 50)),
+                daemon=True,
+            ).start()
 
     def _auto_motor_off_delay(self, steps: int, speed: int) -> None:
         duration = (steps * speed * 2) / 1_000_000.0
@@ -783,10 +980,18 @@ class ReefController:
     def emergency_stop(self) -> None:
         self._send_command("MTR OFF")
 
-    def update_pump_config(self, axis: str, name: Optional[str] = None, volume_ml: Optional[float] = None, direction: Optional[int] = None) -> None:
+    def update_pump_config(
+        self,
+        axis: str,
+        name: Optional[str] = None,
+        volume_ml: Optional[float] = None,
+        direction: Optional[int] = None,
+    ) -> None:
         axis = axis.upper()
         with self.state_lock:
-            cfg = self.state.setdefault("pump_config", {}).setdefault(axis, {"name": axis, "volume_ml": 10.0, "direction": 1})
+            cfg = self.state.setdefault("pump_config", {}).setdefault(
+                axis, {"name": axis, "volume_ml": 10.0, "direction": 1}
+            )
             if name:
                 cfg["name"] = name
             if volume_ml is not None:
@@ -795,7 +1000,9 @@ class ReefController:
                 cfg["direction"] = direction
         self._save_pump_config()
 
-    def update_light_schedule(self, day: str, on_time: Optional[str], off_time: Optional[str]) -> None:
+    def update_light_schedule(
+        self, day: str, on_time: Optional[str], off_time: Optional[str]
+    ) -> None:
         if not day:
             raise ValueError("Jour manquant")
         key = day.strip().lower()
