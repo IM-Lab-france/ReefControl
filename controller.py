@@ -758,7 +758,8 @@ class ReefController:
             targets = self.state.get("heat_targets", {}).copy()
             temps = {
                 "water": self.state.get("tw"),
-                "reserve": self.state.get("tx"),
+                # Réserve pilotée par la sonde Y-MAX
+                "reserve": self.state.get("ty_max"),
             }
             states = self.state.get("heat_state", {}).copy()
         hysteresis = 0.2
