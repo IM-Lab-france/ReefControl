@@ -1,9 +1,19 @@
-﻿from flask import Flask, jsonify, render_template, request
+﻿import atexit
+
+from flask import Flask, jsonify, render_template, request
 
 from controller import controller, list_serial_ports
 
 
 app = Flask(__name__)
+
+
+def _close_telemetry() -> None:
+    if controller.telemetry:
+        controller.telemetry.close()
+
+
+atexit.register(_close_telemetry)
 
 
 @app.route("/")

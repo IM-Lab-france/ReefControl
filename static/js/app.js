@@ -343,6 +343,16 @@ function applyStateToUI(state) {
     setInputIfIdle("tset_res2", heatTargets.temp_2 ?? state.tset_res ?? "");
   }
 
+  const lightLuxEl = document.getElementById("lightLuxValue");
+  if (lightLuxEl) {
+    const lux = state.light_lux;
+    if (typeof lux === "number" && isFinite(lux)) {
+      lightLuxEl.textContent = `${lux.toFixed(1)} lx`;
+    } else {
+      lightLuxEl.textContent = "-- lx";
+    }
+  }
+
 
   document.getElementById("autoFanChk").checked = !!state.auto_fan;
   document.getElementById("autoFanModeBadge").textContent = state.auto_fan

@@ -8,10 +8,10 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS, WriteApi
+from influxdb_client.client.write_api import WriteApi, WriteOptions
 import serial
 import serial.tools.list_ports
 import requests
@@ -21,6 +21,18 @@ try:
 except Exception:
     GPIO = None
 
+try:
+    import board  # type: ignore
+    import busio  # type: ignore
+    import adafruit_tsl2591  # type: ignore
+
+    HAS_TSL2591 = True
+except Exception:
+    board = None
+    busio = None
+    adafruit_tsl2591 = None
+    HAS_TSL2591 = False
+
 BAUDRATE = 115200
 HANDSHAKE_TIMEOUT = 4.0
 BASE_DIR = Path(__file__).resolve().parent
@@ -28,7 +40,8 @@ PUMP_CONFIG_PATH = BASE_DIR / "pump_config.json"
 LIGHT_SCHEDULE_PATH = BASE_DIR / "light_schedule.json"
 HEAT_CONFIG_PATH = BASE_DIR / "heat_config.json"
 FEEDER_CONFIG_PATH = BASE_DIR / "feeder_config.json"
-VALUES_POST_PERIOD = 1.0
+CONTROL_FILE_PATH = BASE_DIR / "control.txt"
+VALUES_POST_PERIOD = 10.0
 REQUEST_TIMEOUT = 3.0
 VALUES_LOG_PATH = BASE_DIR / "telemetry_values.log"
 EVENTS_LOG_PATH = BASE_DIR / "telemetry_events.log"
@@ -38,6 +51,7 @@ FAN_GPIO_PIN = 23
 HEAT_GPIO_PIN = 24  # relais chauffe eau
 TEMP_NAMES_PATH = Path("temp_names.json")
 LIGHT_GPIO_PIN = 27
+LIGHT_QUERY_PERIOD = 6.0
 LIGHT_DAY_KEYS = [
     "monday",
     "tuesday",
@@ -96,7 +110,6 @@ class TelemetryPublisher:
         self._write_api: Optional[WriteApi] = None
         self.bucket = INFLUXDB_BUCKET
         self.org = INFLUXDB_ORG
-        self.measurement = INFLUXDB_MEASUREMENT
         missing = [
             name
             for name, value in {
@@ -116,78 +129,104 @@ class TelemetryPublisher:
             self._client = InfluxDBClient(
                 url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG
             )
-            self._write_api = self._client.write_api(write_options=SYNCHRONOUS)
+            write_options = WriteOptions(
+                batch_size=500, flush_interval=10_000, jitter_interval=2_000
+            )
+            self._write_api = self._client.write_api(write_options=write_options)
         except Exception as exc:
             logger.error("Impossible d'initialiser le client InfluxDB: %s", exc)
             self._client = None
             self._write_api = None
 
+    def close(self) -> None:
+        if self._client:
+            self._client.close()
+
     def emit(
         self,
-        metric: str,
-        value: Optional[Any],
-        *,
-        category: str = "value",
-        tags: Optional[Dict[str, Any]] = None,
-        details: Optional[Dict[str, Any]] = None,
+        measurement: str,
+        tags: Dict[str, Any],
+        fields: Dict[str, Any],
     ) -> None:
-        if (
-            not metric
-            or self._write_api is None
-            or self.bucket is None
-            or self.org is None
-        ):
+        if not all([measurement, tags, fields, self._write_api, self.bucket, self.org]):
             return
-        numeric_value = self._coerce_value(value)
-        if numeric_value is None:
+
+        point = Point(measurement)
+        for key, value in tags.items():
+            if value is not None:
+                point.tag(str(key), str(value))
+
+        valid_fields = False
+        for key, value in fields.items():
+            coerced_value = self._coerce_field_value(value)
+            if coerced_value is not None:
+                point.field(str(key), coerced_value)
+                valid_fields = True
+
+        if not valid_fields:
             return
-        point = Point(self.measurement).tag("metric", metric).tag("category", category)
-        if tags:
-            for key, tag_value in tags.items():
-                if tag_value is None:
-                    continue
-                point.tag(key, str(tag_value))
-        if details:
-            try:
-                details_str = json.dumps(details, ensure_ascii=False)
-            except Exception:
-                details_str = str(details)
-            point.field("details", details_str)
-        point.field("value", numeric_value)
+
         try:
             self._write_api.write(bucket=self.bucket, org=self.org, record=point)
             telemetry_influx_logger.info(
-                "INFLUX measurement=%s metric=%s category=%s tags=%s value=%s",
-                self.measurement,
-                metric,
-                category,
-                tags or {},
-                numeric_value,
+                "INFLUX measurement=%s tags=%s fields=%s",
+                measurement,
+                tags,
+                fields,
             )
         except Exception as exc:
             telemetry_influx_logger.error(
-                "INFLUX measurement=%s metric=%s category=%s error=%s value=%s tags=%s",
-                self.measurement,
-                metric,
-                category,
+                "INFLUX measurement=%s tags=%s fields=%s error=%s",
+                measurement,
+                tags,
+                fields,
                 exc,
-                value,
-                tags or {},
             )
 
     @staticmethod
-    def _coerce_value(value: Optional[Any]) -> Optional[float]:
+    def _coerce_field_value(
+        value: Any,
+    ) -> Optional[Union[float, int, bool, str]]:
         if value is None:
             return None
         if isinstance(value, bool):
-            return 1.0 if value else 0.0
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return value
         try:
             return float(value)
         except (TypeError, ValueError):
-            return None
+            try:
+                return str(value)
+            except Exception:
+                return None
 
 
 telemetry_publisher = TelemetryPublisher()
+
+
+class LightSensorTSL2591:
+    def __init__(self) -> None:
+        if (
+            not HAS_TSL2591
+            or board is None
+            or busio is None
+            or adafruit_tsl2591 is None
+        ):
+            raise RuntimeError("TSL2591 library not available")
+        self._i2c = busio.I2C(board.SCL, board.SDA)
+        self._sensor = adafruit_tsl2591.TSL2591(self._i2c)
+
+    def read_lux(self) -> Optional[float]:
+        try:
+            lux = self._sensor.lux
+            if lux is None:
+                return None
+            return float(lux)
+        except Exception:
+            return None
 
 
 def list_serial_ports() -> list[Dict[str, str]]:
@@ -330,9 +369,12 @@ class ReefController:
             },
             "feeder_auto": True,
             "feeder_schedule": [],
+            "light_lux": None,
         }
         self.global_speed = 300
         self.steps_per_job = 1000
+        self._light_sensor: Optional[LightSensorTSL2591] = None
+        self._last_light_query = 0.0
         self._load_configs()
         self._ensure_pump_defaults()
         self._ensure_light_schedule_defaults()
@@ -356,6 +398,13 @@ class ReefController:
         self._last_values_push = 0.0
         self._last_auto_connect_attempt = 0.0
         self._last_feeder_runs: Dict[str, float] = {}
+        if HAS_TSL2591:
+            try:
+                self._light_sensor = LightSensorTSL2591()
+                logger.info("Capteur TSL2591 initialisé")
+            except Exception as exc:
+                self._light_sensor = None
+                logger.warning("Impossible d'initialiser le capteur TSL2591: %s", exc)
         self.light_scheduler = threading.Thread(
             target=self._light_scheduler_loop, daemon=True
         )
@@ -559,6 +608,15 @@ class ReefController:
             for day in LIGHT_DAY_KEYS:
                 sched.setdefault(day, {"on": "08:00", "off": "20:00"})
 
+    def _pause_requested(self) -> bool:
+        try:
+            if not CONTROL_FILE_PATH.exists():
+                return False
+            content = CONTROL_FILE_PATH.read_text(encoding="utf-8").strip().lower()
+            return "stop" in content
+        except Exception:
+            return False
+
     def _init_light_gpio(self) -> None:
         if GPIO is None:
             logger.debug("RPi.GPIO not available; light relay disabled")
@@ -652,45 +710,84 @@ class ReefController:
             logger.error("Fan relay write failed: %s", exc)
             self.fan_gpio_ready = False
 
-    def _publish_value(
-        self, metric: str, value: Optional[Any], tags: Optional[Dict[str, Any]] = None
+    def _publish_sensor_reading(
+        self, sensor_id: str, sensor_name: str, fields: Dict[str, Any]
     ) -> None:
-        if value is None:
-            return
+        """Publie une lecture de capteur vers InfluxDB."""
         telemetry_values_logger.info(
-            "VALUE metric=%s value=%s tags=%s", metric, value, tags or {}
+            "SENSOR sensor_id=%s sensor_name=%s fields=%s",
+            sensor_id,
+            sensor_name,
+            fields,
         )
         if self.telemetry:
-            self.telemetry.emit(metric, value, category="value", tags=tags)
+            self.telemetry.emit(
+                measurement="sensor_readings",
+                tags={"sensor_id": sensor_id, "sensor_name": sensor_name},
+                fields=fields,
+            )
 
-    def _publish_event(
-        self, name: str, details: Optional[Dict[str, Any]], category: str
+    def _publish_device_event(
+        self, device_type: str, device_id: str, source: str, fields: Dict[str, Any]
     ) -> None:
-        payload = {"ts": time.time(), "details": details or {}}
-        try:
-            payload_str = json.dumps(payload["details"], ensure_ascii=False)
-        except Exception:
-            payload_str = str(payload["details"])
+        """Publie un événement d'appareil vers InfluxDB."""
+
+        # On duplique les booléens sur des champs *_int pour éviter les conflits de type
+        payload: Dict[str, Any] = {}
+        for key, val in fields.items():
+            if isinstance(val, bool):
+                payload[f"{key}_int"] = 1 if val else 0
+            else:
+                payload[key] = val
+
         telemetry_events_logger.info(
-            "EVENT category=%s name=%s details=%s", category, name, payload_str
+            "DEVICE device_type=%s device_id=%s source=%s fields=%s",
+            device_type,
+            device_id,
+            source,
+            payload,
         )
         if self.telemetry:
-            self.telemetry.emit(name, 1.0, category=category, details=payload)
+            self.telemetry.emit(
+                measurement="device_events",
+                tags={
+                    "device_type": device_type,
+                    "device_id": device_id,
+                    "source": source,
+                },
+                fields=payload,
+            )
 
-    def _publish_user_action(
-        self, name: str, details: Optional[Dict[str, Any]] = None
+    def _publish_setting_change(
+        self, setting_group: str, setting_name: str, value: Any
     ) -> None:
-        self._publish_event(name, details, "user_action")
+        """Publie un changement de paramètre vers InfluxDB."""
+        fields: Dict[str, Any] = {}
 
-    def _publish_automation(
-        self, name: str, details: Optional[Dict[str, Any]] = None
-    ) -> None:
-        self._publish_event(name, details, "automation")
-
-    def _publish_system_event(
-        self, name: str, details: Optional[Dict[str, Any]] = None
-    ) -> None:
-        self._publish_event(name, details, "system")
+        if isinstance(value, bool):
+            fields["value_bool"] = value
+        elif isinstance(value, (int, float)):
+            try:
+                fields["value_float"] = float(value)
+            except Exception:
+                try:
+                    fields["value_string"] = str(value)
+                except Exception:
+                    return
+        else:
+            try:
+                fields["value_string"] = str(value)
+            except Exception:
+                return
+        telemetry_events_logger.info(
+            "SETTING group=%s name=%s value=%s", setting_group, setting_name, value
+        )
+        if self.telemetry and fields:
+            self.telemetry.emit(
+                measurement="settings",
+                tags={"setting_group": setting_group, "setting_name": setting_name},
+                fields=fields,
+            )
 
     def _get_peristaltic_profile(self, axis: str) -> tuple[str, float]:
         axis_key = axis.upper()
@@ -706,30 +803,6 @@ class ReefController:
         except (TypeError, ValueError):
             volume = 0.0
         return name, volume
-
-    def _record_peristaltic_dose(
-        self,
-        axis: str,
-        *,
-        source: str,
-        backwards: bool = False,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        name, volume = self._get_peristaltic_profile(axis)
-        signed_volume = -volume if backwards else volume
-        details: Dict[str, Any] = {
-            "axis": axis.upper(),
-            "name": name,
-            "volume_ml": signed_volume,
-        }
-        if metadata:
-            details.update(metadata)
-        self._publish_value(
-            "peristaltic_dose_ml",
-            signed_volume,
-            {"axis": axis.upper(), "name": name, "source": source},
-        )
-        return details
 
     def _evaluate_fan(self) -> None:
         with self.state_lock:
@@ -749,9 +822,15 @@ class ReefController:
                 self.state["fan_on"] = desired
                 self.state["fan"] = 255 if desired else 0
             self._drive_fan_gpio(desired)
-            self._publish_automation(
-                "fan_auto_toggle",
-                {"from": current, "to": desired, "threshold": thresh},
+            self._publish_device_event(
+                device_type="fan",
+                device_id="main_fan",
+                source="automation",
+                fields={
+                    "state": desired,
+                    "trigger_temp": temp_val,
+                    "threshold": thresh,
+                },
             )
 
     def toggle_pump(self, state: Optional[bool] = None) -> None:
@@ -763,8 +842,11 @@ class ReefController:
                 new_state = bool(state)
             self.state["pump_state"] = new_state
         self._drive_pump_gpio(new_state)
-        self._publish_user_action(
-            "pump_manual_toggle", {"from": prev_state, "to": new_state}
+        self._publish_device_event(
+            device_type="pump",
+            device_id="main",
+            source="user",
+            fields={"state": new_state, "previous_state": prev_state},
         )
 
     def _drive_light_gpio(self, enabled: bool) -> None:
@@ -787,6 +869,9 @@ class ReefController:
     def _telemetry_loop(self) -> None:
         while True:
             try:
+                if self._pause_requested():
+                    time.sleep(1.0)
+                    continue
                 now = time.time()
                 if self.connected:
                     if now - self._last_temp_query > 2.0:
@@ -815,6 +900,17 @@ class ReefController:
                 if now - self._last_values_push >= VALUES_POST_PERIOD:
                     self._last_values_push = now
                     self._post_values()
+                if (
+                    self._light_sensor
+                    and now - self._last_light_query > LIGHT_QUERY_PERIOD
+                ):
+                    self._last_light_query = now
+                    try:
+                        lux = self._light_sensor.read_lux()
+                        with self.state_lock:
+                            self.state["light_lux"] = lux
+                    except Exception as exc:
+                        logger.debug("Lecture TSL2591 échouée: %s", exc)
                 time.sleep(1.0)
             except Exception as exc:
                 logger.error("Telemetry loop error: %s", exc)
@@ -894,7 +990,11 @@ class ReefController:
         method_norm = method.upper() if isinstance(method, str) else "GET"
         if method_norm not in ("GET", "POST"):
             method_norm = "GET"
-        origin = "user_action" if isinstance(key, str) and key.startswith("manual|") else "automation"
+        source = (
+            "user"
+            if isinstance(key, str) and key.startswith("manual|")
+            else "automation"
+        )
         try:
             if method_norm == "POST":
                 resp = requests.post(url, timeout=REQUEST_TIMEOUT)
@@ -913,10 +1013,16 @@ class ReefController:
                 "key": key,
                 "method": method_norm,
             }
-            if origin == "user_action":
-                self._publish_user_action("feeder_trigger", details)
-            else:
-                self._publish_automation("feeder_trigger", details)
+            self._publish_device_event(
+                device_type="feeder_webhook",
+                device_id=str(key),
+                source=source,
+                fields={
+                    "status": resp.status_code,
+                    "method": method_norm,
+                    "url": url,
+                },
+            )
         except Exception as exc:
             telemetry_events_logger.error(
                 "Feeder trigger error %s %s key=%s: %s", method_norm, url, key, exc
@@ -927,10 +1033,12 @@ class ReefController:
                 "method": method_norm,
                 "error": str(exc),
             }
-            if origin == "user_action":
-                self._publish_user_action("feeder_trigger_error", details)
-            else:
-                self._publish_automation("feeder_trigger_error", details)
+            self._publish_device_event(
+                device_type="feeder_webhook",
+                device_id=str(key),
+                source=source,
+                fields=details,
+            )
 
     def _normalize_url(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
@@ -959,6 +1067,7 @@ class ReefController:
             pump_cfg = pump_cfg_raw.copy() if isinstance(pump_cfg_raw, dict) else {}
             peristaltic_state = self.state.get("peristaltic_state", {})
             peristaltic = []
+            light_lux = self.state.get("light_lux")
             for axis_key in ("X", "Y", "Z", "E"):
                 cfg = pump_cfg.get(axis_key, {}) if isinstance(pump_cfg, dict) else {}
                 if not isinstance(cfg, dict):
@@ -981,87 +1090,112 @@ class ReefController:
             "heat_state": heat_state,
             "fan": {"on": fan_on, "value": fan_value},
             "ph": {"value": ph, "voltage": ph_v, "raw": ph_raw},
+            "light": {"lux": light_lux},
         }
 
     def _post_values(self) -> None:
         payload = self._build_values_payload()
         try:
-            temperatures = payload.get("temperatures", [])
-            if isinstance(temperatures, list):
-                for entry in temperatures:
-                    if not isinstance(entry, dict):
-                        continue
-                    self._publish_value(
-                        "temperature_celsius",
-                        entry.get("value"),
-                        {
-                            "sensor": str(entry.get("key", "")),
-                            "name": str(entry.get("name", "")),
-                        },
+            # Lectures de capteurs
+            for entry in payload.get("temperatures", []):
+                if isinstance(entry, dict) and entry.get("value") is not None:
+                    sensor_name = str(entry.get("name", "")) or str(
+                        entry.get("key", "")
+                    )
+                    self._publish_sensor_reading(
+                        sensor_id=sensor_name,
+                        sensor_name=sensor_name,
+                        fields={"celsius": entry.get("value")},
                     )
 
             ph_data = payload.get("ph", {})
-            if isinstance(ph_data, dict):
-                self._publish_value("ph_value", ph_data.get("value"))
-                self._publish_value("ph_voltage", ph_data.get("voltage"))
-                self._publish_value("ph_raw", ph_data.get("raw"))
+            if isinstance(ph_data, dict) and ph_data.get("value") is not None:
+                self._publish_sensor_reading(
+                    sensor_id="ph_probe",
+                    sensor_name="Sonde pH",
+                    fields={
+                        "ph": ph_data.get("value"),
+                        "voltage": ph_data.get("voltage"),
+                        "raw": ph_data.get("raw"),
+                    },
+                )
 
-            levels = payload.get("levels", {})
-            if isinstance(levels, dict):
-                for level_name, level_value in levels.items():
-                    self._publish_value(
-                        "water_level_state",
-                        level_value,
-                        {"sensor": str(level_name)},
+            light_data = payload.get("light", {})
+            if isinstance(light_data, dict):
+                lux_value = light_data.get("lux")
+                if lux_value is not None:
+                    self._publish_sensor_reading(
+                        sensor_id="tsl2591",
+                        sensor_name="Capteur lumière TSL2591",
+                        fields={"lux": lux_value},
                     )
 
-            fan_data = payload.get("fan", {})
-            if isinstance(fan_data, dict):
-                self._publish_value("fan_pwm_value", fan_data.get("value"))
-                self._publish_value("fan_state", 1 if fan_data.get("on") else 0)
+            # États des appareils
+            levels = payload.get("levels", {})
+            if isinstance(levels, dict):
+                for name, value in levels.items():
+                    fields: Dict[str, Any] = {}
+                    numeric_state: Optional[float]
+                    try:
+                        numeric_state = float(value)
+                    except (TypeError, ValueError):
+                        numeric_state = None
+                    if numeric_state is not None and not math.isnan(numeric_state):
+                        fields["state"] = numeric_state
+                    else:
+                        fields["state_text"] = str(value)
+                    self._publish_sensor_reading(
+                        sensor_id=f"level_{name}",
+                        sensor_name=f"Niveau {name}",
+                        fields=fields,
+                    )
 
             pumps = payload.get("pumps", {})
             if isinstance(pumps, dict):
-                for pump_name, pump_state in pumps.items():
-                    self._publish_value(
-                        "pump_state",
-                        1 if pump_state else 0,
-                        {"pump": str(pump_name)},
+                if "main" in pumps:
+                    self._publish_device_event(
+                        device_type="pump",
+                        device_id="main",
+                        source="state_poll",
+                        fields={"state": pumps["main"]},
                     )
-
-            peristaltic = payload.get("peristaltic", [])
-            if isinstance(peristaltic, list):
-                for pump_entry in peristaltic:
-                    if not isinstance(pump_entry, dict):
-                        continue
-                    self._publish_value(
-                        "peristaltic_power_state",
-                        1 if pump_entry.get("powered") else 0,
-                        {
-                            "axis": str(pump_entry.get("axis", "")),
-                            "name": str(pump_entry.get("name", "")),
-                        },
+                if "motors_powered" in pumps:
+                    self._publish_device_event(
+                        device_type="peristaltic_power",
+                        device_id="main_stepper_power",
+                        source="state_poll",
+                        fields={"state": pumps["motors_powered"]},
                     )
 
             relays = payload.get("relays", {})
             if isinstance(relays, dict):
-                for relay_name, relay_state in relays.items():
-                    self._publish_value(
-                        "relay_state",
-                        1 if relay_state else 0,
-                        {"relay": str(relay_name)},
+                for name, state in relays.items():
+                    self._publish_device_event(
+                        device_type="relay",
+                        device_id=name,
+                        source="state_poll",
+                        fields={"state": state},
                     )
 
-            heat_state = payload.get("heat_state", {})
-            if isinstance(heat_state, dict):
-                for zone, state in heat_state.items():
-                    self._publish_value(
-                        "heat_zone_state",
-                        1 if state else 0,
-                        {"zone": str(zone)},
-                    )
+            # Consignes de température (publier régulièrement pour Grafana)
+            with self.state_lock:
+                heat_targets = self.state.get("heat_targets", {})
+                water_target = heat_targets.get("temp_1", self.state.get("tset_water"))
+                reserve_target = heat_targets.get("temp_2", self.state.get("tset_res"))
+            if water_target is not None:
+                self._publish_setting_change(
+                    setting_group="heat",
+                    setting_name="target_water",
+                    value=water_target,
+                )
+            if reserve_target is not None:
+                self._publish_setting_change(
+                    setting_group="heat",
+                    setting_name="target_reserve",
+                    value=reserve_target,
+                )
         except Exception as exc:
-            logger.error("Erreur lors de la préparation des mesures InfluxDB: %s", exc)
+            logger.error("Erreur lors de la publication des mesures InfluxDB: %s", exc)
 
     def _auto_connect_serial(self) -> None:
         """Auto-connect to the first available Mega on common ACM ports."""
@@ -1122,9 +1256,11 @@ class ReefController:
         if should_on != current:
             logger.info("Light schedule toggling to %s for %s", should_on, day_key)
             self.toggle_light(should_on)
-            self._publish_automation(
-                "light_schedule_toggle",
-                {"from": current, "to": should_on, "day": day_key},
+            self._publish_device_event(
+                device_type="relay",
+                device_id="light",
+                source="automation",
+                fields={"state": should_on, "day_of_week": day_key},
             )
 
     # ---------- Serial helpers ----------
@@ -1185,9 +1321,11 @@ class ReefController:
                     new_state = value in ("1", "ON", "TRUE")
                     self.state["motors_powered"] = new_state
                     if new_state != prev:
-                        self._publish_system_event(
-                            "pump_motor_state",
-                            {"from": prev, "to": new_state, "source": "status_line"},
+                        self._publish_device_event(
+                            device_type="peristaltic_power",
+                            device_id="main_stepper_power",
+                            source="status_line",
+                            fields={"state": new_state, "previous_state": prev},
                         )
                 elif key == "fan_val":
                     try:
@@ -1253,22 +1391,38 @@ class ReefController:
                     axis_map = {"mtrx": "X", "mtry": "Y", "mtrz": "Z", "mtre": "E"}
                     axis_key = axis_map.get(key)
                     if axis_key:
-                        prev = bool(self.state.get("peristaltic_state", {}).get(axis_key, False))
+                        prev = bool(
+                            self.state.get("peristaltic_state", {}).get(axis_key, False)
+                        )
                         new_state = value in ("1", "ON", "TRUE", "true", "on")
-                        self.state.setdefault("peristaltic_state", {})[axis_key] = new_state
+                        self.state.setdefault("peristaltic_state", {})[
+                            axis_key
+                        ] = new_state
                         if new_state != prev:
-                            self._publish_system_event(
-                                "peristaltic_state",
-                                {"axis": axis_key, "from": prev, "to": new_state, "source": "status_line"},
+                            name, volume = self._get_peristaltic_profile(axis_key)
+                            device_id = name or axis_key
+                            self._publish_device_event(
+                                device_type="peristaltic_pump",
+                                device_id=device_id,
+                                source="status_line",
+                                fields={
+                                    "state": new_state,
+                                    "previous_state": prev,
+                                    "axis": axis_key,
+                                },
                             )
                             if new_state:
-                                details = self._record_peristaltic_dose(
-                                    axis_key,
+                                self._publish_device_event(
+                                    device_type="peristaltic_pump",
+                                    device_id=device_id,
                                     source="automation",
-                                    backwards=False,
-                                    metadata={"reason": "status_line"},
+                                    fields={
+                                        "product_name": name,
+                                        "volume_ml": volume,
+                                        "reason": "status_line",
+                                        "axis": axis_key,
+                                    },
                                 )
-                                self._publish_automation("peristaltic_auto_run", details)
 
     def _apply_temp_line(self, line: str) -> None:
         payload = line.replace("C", "")
@@ -1388,12 +1542,29 @@ class ReefController:
                 self.state["heat_enabled"] = any(states.values())
             self._save_heat_config()
             self._update_heater_outputs()
-            self._publish_automation(
-                "heat_auto_toggle",
-                {
-                    "from": prev_states,
-                    "to": states,
-                    "heat_enabled": any(states.values()),
+            for zone, new_state in states.items():
+                prev = prev_states.get(zone)
+                if new_state != prev:
+                    self._publish_device_event(
+                        device_type="heater_zone",
+                        device_id=str(zone),
+                        source="automation",
+                        fields={
+                            "state": new_state,
+                            "previous_state": prev,
+                            "target": targets.get(zone),
+                            "temperature": self._parse_temperature_value(
+                                temps.get(zone)
+                            ),
+                            "hysteresis": hysteresis,
+                        },
+                    )
+            self._publish_device_event(
+                device_type="heater",
+                device_id="main",
+                source="automation",
+                fields={
+                    "state": any(states.values()),
                     "hysteresis": hysteresis,
                 },
             )
@@ -1403,7 +1574,9 @@ class ReefController:
             self.state["heat_hyst"] = value
         self._save_heat_config()
         self._evaluate_heat_needs()
-        self._publish_user_action("heat_hysteresis_update", {"value": value})
+        self._publish_setting_change(
+            setting_group="heat", setting_name="hysteresis", value=value
+        )
 
     def _sanitize_temp_text(self, raw: Any, fallback: str) -> str:
         try:
@@ -1442,7 +1615,12 @@ class ReefController:
             self._apply_status_line(status.split(";", 1)[1])
         logger.info("Mega connecté (%s)", hello)
         self._apply_heat_targets()
-        self._publish_system_event("serial_connect", {"port": port})
+        self._publish_device_event(
+            device_type="serial",
+            device_id=str(port),
+            source="system",
+            fields={"connected": True},
+        )
 
     def disconnect(self) -> None:
         port = self.serial.port
@@ -1453,7 +1631,12 @@ class ReefController:
         self.status_text = "Déconnecté"
         self._drive_heat_gpio(False)
         self._drive_fan_gpio(False)
-        self._publish_system_event("serial_disconnect", {"port": port})
+        self._publish_device_event(
+            device_type="serial",
+            device_id=str(port),
+            source="system",
+            fields={"connected": False},
+        )
 
     # ---------- Actions exposed to API ----------
     def read_temps_once(self) -> None:
@@ -1471,7 +1654,9 @@ class ReefController:
             self._evaluate_heat_needs()
         else:
             self._update_heater_outputs()
-        self._publish_user_action("heat_target_water_update", {"value": value})
+        self._publish_setting_change(
+            setting_group="heat", setting_name="target_water", value=value
+        )
 
     def set_reserve(self, value: float) -> None:
         with self.state_lock:
@@ -1482,14 +1667,18 @@ class ReefController:
             self._evaluate_heat_needs()
         else:
             self._update_heater_outputs()
-        self._publish_user_action("heat_target_reserve_update", {"value": value})
+        self._publish_setting_change(
+            setting_group="heat", setting_name="target_reserve", value=value
+        )
 
     def set_autocool(self, thresh: float) -> None:
         with self.state_lock:
             self.state["auto_thresh"] = thresh
             self.state["auto_fan"] = True
         self._evaluate_fan()
-        self._publish_user_action("fan_auto_threshold_update", {"threshold": thresh})
+        self._publish_setting_change(
+            setting_group="fan", setting_name="auto_threshold", value=thresh
+        )
 
     def set_fan_manual(self, value: int) -> None:
         with self.state_lock:
@@ -1499,8 +1688,15 @@ class ReefController:
             self.state["fan"] = 255 if value else 0
             new = self.state["fan_on"]
         self._drive_fan_gpio(bool(value))
-        self._publish_user_action(
-            "fan_manual_toggle", {"from": prev, "to": new, "value": int(bool(value))}
+        self._publish_device_event(
+            device_type="fan",
+            device_id="main_fan",
+            source="user",
+            fields={
+                "state": new,
+                "previous_state": prev,
+                "manual_value": int(bool(value)),
+            },
         )
 
     def set_auto_fan(self, enable: bool) -> None:
@@ -1514,7 +1710,9 @@ class ReefController:
                 self.state["fan_on"] = False
                 self.state["fan"] = 0
             self._drive_fan_gpio(False)
-        self._publish_user_action("fan_auto_mode_update", {"enable": enable})
+        self._publish_setting_change(
+            setting_group="fan", setting_name="auto_mode", value=enable
+        )
 
     def update_temp_names(self, names: Dict[str, str]) -> None:
         if not isinstance(names, dict):
@@ -1526,8 +1724,10 @@ class ReefController:
                 if key in allowed and isinstance(val, str) and val.strip():
                     current[key] = val.strip()
         self._save_temp_names()
-        self._publish_user_action(
-            "temperature_names_update", {"names": {k: v for k, v in names.items() if k in allowed}}
+        self._publish_setting_change(
+            setting_group="temperature_names",
+            setting_name="labels",
+            value={k: v for k, v in names.items() if k in allowed},
         )
 
     def set_heat_mode(self, auto: bool) -> None:
@@ -1536,7 +1736,9 @@ class ReefController:
         self._save_heat_config()
         if auto:
             self._evaluate_heat_needs()
-        self._publish_user_action("heat_mode_update", {"auto": auto})
+        self._publish_setting_change(
+            setting_group="heat", setting_name="auto_mode", value=auto
+        )
 
     def set_heat_power(self, enable: bool) -> None:
         with self.state_lock:
@@ -1549,42 +1751,65 @@ class ReefController:
             new = bool(self.state["heat_enabled"])
         self._save_heat_config()
         self._update_heater_outputs()
-        self._publish_user_action("heat_manual_toggle", {"from": prev, "to": new})
+        self._publish_device_event(
+            device_type="heater",
+            device_id="manual_override",
+            source="user",
+            fields={"state": new, "previous_state": prev},
+        )
 
     def toggle_protect(self, enable: bool) -> None:
         with self.state_lock:
             self.state["protect"] = enable
-        self._publish_user_action("protect_mode_update", {"enable": enable})
+        self._publish_setting_change(
+            setting_group="safety", setting_name="protect_mode", value=enable
+        )
 
     def set_servo(self, angle: int) -> None:
         with self.state_lock:
             self.state["servo_angle"] = angle
         self._send_command(f"SERVO {angle}")
-        self._publish_user_action("servo_angle_set", {"angle": angle})
+        self._publish_device_event(
+            device_type="servo",
+            device_id="feeder_servo",
+            source="user",
+            fields={"angle": angle},
+        )
 
     def dispense_macro(self) -> None:
         self._send_command("SERVOFEED")
-        self._publish_user_action("servo_macro_dispense", None)
+        self._publish_device_event(
+            device_type="servo",
+            device_id="feeder_servo",
+            source="user",
+            fields={"action": "macro_dispense"},
+        )
 
     def set_mtr_auto_off(self, enable: bool) -> None:
         with self.state_lock:
             self.state["mtr_auto_off"] = enable
-        self._publish_user_action("motor_auto_off_update", {"enable": enable})
+        self._publish_setting_change(
+            setting_group="pump", setting_name="auto_motor_off", value=enable
+        )
 
     def set_steps_speed(self, steps: int, speed: int) -> None:
         with self.state_lock:
             self.steps_per_job = steps
             self.state["steps"] = steps
             self.state["speed"] = speed
-        self._publish_user_action(
-            "pump_steps_speed_update", {"steps": steps, "speed": speed}
+        self._publish_setting_change(
+            setting_group="pump",
+            setting_name="steps_speed",
+            value={"steps": steps, "speed": speed},
         )
 
     def set_global_speed(self, speed: int) -> None:
         with self.state_lock:
             self.global_speed = speed
             self.state["speed"] = speed
-        self._publish_user_action("global_speed_update", {"speed": speed})
+        self._publish_setting_change(
+            setting_group="pump", setting_name="global_speed", value=speed
+        )
 
     def pump(self, axis: str, backwards: bool = False) -> None:
         axis = axis.upper()
@@ -1605,18 +1830,22 @@ class ReefController:
                 args=(abs(steps), command_speed),
                 daemon=True,
             ).start()
-        dose_details = self._record_peristaltic_dose(
-            axis,
+        name, volume = self._get_peristaltic_profile(axis)
+        device_id = name or axis
+        signed_volume = -volume if backwards else volume
+        self._publish_device_event(
+            device_type="peristaltic_pump",
+            device_id=device_id,
             source="user",
-            backwards=backwards,
-            metadata={
-                "backwards": backwards,
-                "steps": steps,
+            fields={
+                "product_name": name,
+                "volume_ml": signed_volume,
+                "steps": signed_steps,
                 "speed": command_speed,
-                "auto_off": auto_off,
+                "direction": -1 if backwards else 1,
+                "axis": axis,
             },
         )
-        self._publish_user_action("pump_manual_run", dose_details)
 
     def _auto_motor_off_delay(self, steps: int, speed: int) -> None:
         duration = (steps * speed * 2) / 1_000_000.0
@@ -1628,7 +1857,12 @@ class ReefController:
 
     def emergency_stop(self) -> None:
         self._send_command("MTR OFF")
-        self._publish_user_action("emergency_stop", None)
+        self._publish_device_event(
+            device_type="pump",
+            device_id="all",
+            source="user",
+            fields={"action": "emergency_stop"},
+        )
 
     def update_pump_config(
         self,
@@ -1646,13 +1880,13 @@ class ReefController:
                 cfg["name"] = name
             if volume_ml is not None:
                 cfg["volume_ml"] = volume_ml
-            if direction in (1, -1):
-                cfg["direction"] = direction
+        if direction in (1, -1):
+            cfg["direction"] = direction
         self._save_pump_config()
-        self._publish_user_action(
-            "pump_config_update",
-            {
-                "axis": axis,
+        self._publish_setting_change(
+            setting_group="pump",
+            setting_name=f"config_{axis}",
+            value={
                 "name": name,
                 "volume_ml": volume_ml,
                 "direction": direction,
@@ -1675,9 +1909,10 @@ class ReefController:
             if off_time is not None:
                 entry["off"] = off_time
         self._save_light_schedule()
-        self._publish_user_action(
-            "light_schedule_update",
-            {"day": key, "on": on_time, "off": off_time},
+        self._publish_setting_change(
+            setting_group="light_schedule",
+            setting_name=key,
+            value={"on": on_time, "off": off_time},
         )
 
     def toggle_light(
@@ -1694,18 +1929,27 @@ class ReefController:
             new = bool(self.state["light_state"])
         self._drive_light_gpio(self.state["light_state"])
         if event_type:
-            self._publish_user_action(event_type, {"from": prev, "to": new})
+            self._publish_device_event(
+                device_type="relay",
+                device_id="light",
+                source="user",
+                fields={"state": new, "previous_state": prev, "event": event_type},
+            )
 
     def set_light_auto(self, enable: bool) -> None:
         with self.state_lock:
             self.state["light_auto"] = enable
-        self._publish_user_action("light_auto_mode_update", {"enable": enable})
+        self._publish_setting_change(
+            setting_group="light", setting_name="auto_mode", value=enable
+        )
 
     def set_feeder_auto(self, enable: bool) -> None:
         with self.state_lock:
             self.state["feeder_auto"] = bool(enable)
         self._save_feeder_config()
-        self._publish_user_action("feeder_auto_mode_update", {"enable": enable})
+        self._publish_setting_change(
+            setting_group="feeder", setting_name="auto_mode", value=enable
+        )
 
     def update_feeder_schedule(self, entries: list[Dict[str, Any]]) -> None:
         valid = []
@@ -1735,8 +1979,10 @@ class ReefController:
         with self.state_lock:
             self.state["feeder_schedule"] = valid
         self._save_feeder_config()
-        self._publish_user_action(
-            "feeder_schedule_update", {"count": len(valid), "entries": valid}
+        self._publish_setting_change(
+            setting_group="feeder",
+            setting_name="schedule",
+            value={"count": len(valid), "entries": valid},
         )
 
     def trigger_feeder_url(self, url: str, method: str = "GET") -> None:
@@ -1746,7 +1992,9 @@ class ReefController:
         if method_norm not in ("GET", "POST"):
             method_norm = "GET"
         clean_url = url.strip()
-        self._trigger_feeder_url(clean_url, f"manual|{method_norm}|{clean_url}", method_norm)
+        self._trigger_feeder_url(
+            clean_url, f"manual|{method_norm}|{clean_url}", method_norm
+        )
 
     def raw(self, cmd: str) -> None:
         self._send_command(cmd)

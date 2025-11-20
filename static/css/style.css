@@ -38,6 +38,11 @@
     opacity: 0.8;
 }
 
+.light-value {
+    font-size: 1.8rem;
+    font-weight: 600;
+}
+
 .section-title {
     font-weight: 600;
     font-size: 0.9rem;
