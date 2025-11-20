@@ -366,6 +366,14 @@ static void send_status()
   Serial.print(FW_VERSION);
   Serial.print(";MTR=");
   Serial.print(motors_enabled ? 1 : 0);
+  Serial.print(";MTRX=");
+  Serial.print(axis[0].active ? 1 : 0);
+  Serial.print(";MTRY=");
+  Serial.print(axis[1].active ? 1 : 0);
+  Serial.print(";MTRZ=");
+  Serial.print(axis[2].active ? 1 : 0);
+  Serial.print(";MTRE=");
+  Serial.print(axis[3].active ? 1 : 0);
   Serial.print(";FAN_MODE=");
   Serial.print(fan_manual >= 0 ? "MAN" : "AUTO");
   Serial.print(";FAN_VAL=");

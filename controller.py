@@ -1,14 +1,20 @@
 ﻿import json
 import math
 import logging
+import logging.handlers
+import os
 import queue
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS, WriteApi
 import serial
 import serial.tools.list_ports
+import requests
 
 try:
     import RPi.GPIO as GPIO  # type: ignore
@@ -17,9 +23,16 @@ except Exception:
 
 BAUDRATE = 115200
 HANDSHAKE_TIMEOUT = 4.0
-PUMP_CONFIG_PATH = Path("pump_config.json")
-LIGHT_SCHEDULE_PATH = Path("light_schedule.json")
-HEAT_CONFIG_PATH = Path("heat_config.json")
+BASE_DIR = Path(__file__).resolve().parent
+PUMP_CONFIG_PATH = BASE_DIR / "pump_config.json"
+LIGHT_SCHEDULE_PATH = BASE_DIR / "light_schedule.json"
+HEAT_CONFIG_PATH = BASE_DIR / "heat_config.json"
+FEEDER_CONFIG_PATH = BASE_DIR / "feeder_config.json"
+VALUES_POST_PERIOD = 1.0
+REQUEST_TIMEOUT = 3.0
+VALUES_LOG_PATH = BASE_DIR / "telemetry_values.log"
+EVENTS_LOG_PATH = BASE_DIR / "telemetry_events.log"
+INFLUX_LOG_PATH = BASE_DIR / "telemetry_influx.log"
 PUMP_GPIO_PIN = 22
 FAN_GPIO_PIN = 23
 HEAT_GPIO_PIN = 24  # relais chauffe eau
@@ -41,6 +54,140 @@ if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(handler)
+
+
+def _build_rotating_file_logger(name: str, path: str) -> logging.Logger:
+    lgr = logging.getLogger(name)
+    lgr.setLevel(logging.INFO)
+    if not lgr.handlers:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=50 * 1024 * 1024, backupCount=1, encoding="utf-8"
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        lgr.addHandler(handler)
+        lgr.propagate = False
+    return lgr
+
+
+telemetry_values_logger = _build_rotating_file_logger(
+    "reef.telemetry.values", VALUES_LOG_PATH
+)
+telemetry_events_logger = _build_rotating_file_logger(
+    "reef.telemetry.events", EVENTS_LOG_PATH
+)
+telemetry_influx_logger = _build_rotating_file_logger(
+    "reef.telemetry.influx", INFLUX_LOG_PATH
+)
+
+
+INFLUXDB_URL = os.environ.get("INFLUXDB_URL")
+INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN")
+INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG")
+INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET")
+INFLUXDB_MEASUREMENT = os.environ.get("INFLUXDB_MEASUREMENT", "reef_controller")
+
+
+class TelemetryPublisher:
+    def __init__(self) -> None:
+        self._client: Optional[InfluxDBClient] = None
+        self._write_api: Optional[WriteApi] = None
+        self.bucket = INFLUXDB_BUCKET
+        self.org = INFLUXDB_ORG
+        self.measurement = INFLUXDB_MEASUREMENT
+        missing = [
+            name
+            for name, value in {
+                "INFLUXDB_URL": INFLUXDB_URL,
+                "INFLUXDB_TOKEN": INFLUXDB_TOKEN,
+                "INFLUXDB_ORG": INFLUXDB_ORG,
+                "INFLUXDB_BUCKET": INFLUXDB_BUCKET,
+            }.items()
+            if not value
+        ]
+        if missing:
+            logger.error(
+                "Variables d'environnement InfluxDB manquantes: %s", ", ".join(missing)
+            )
+            return
+        try:
+            self._client = InfluxDBClient(
+                url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG
+            )
+            self._write_api = self._client.write_api(write_options=SYNCHRONOUS)
+        except Exception as exc:
+            logger.error("Impossible d'initialiser le client InfluxDB: %s", exc)
+            self._client = None
+            self._write_api = None
+
+    def emit(
+        self,
+        metric: str,
+        value: Optional[Any],
+        *,
+        category: str = "value",
+        tags: Optional[Dict[str, Any]] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if (
+            not metric
+            or self._write_api is None
+            or self.bucket is None
+            or self.org is None
+        ):
+            return
+        numeric_value = self._coerce_value(value)
+        if numeric_value is None:
+            return
+        point = Point(self.measurement).tag("metric", metric).tag("category", category)
+        if tags:
+            for key, tag_value in tags.items():
+                if tag_value is None:
+                    continue
+                point.tag(key, str(tag_value))
+        if details:
+            try:
+                details_str = json.dumps(details, ensure_ascii=False)
+            except Exception:
+                details_str = str(details)
+            point.field("details", details_str)
+        point.field("value", numeric_value)
+        try:
+            self._write_api.write(bucket=self.bucket, org=self.org, record=point)
+            telemetry_influx_logger.info(
+                "INFLUX measurement=%s metric=%s category=%s tags=%s value=%s",
+                self.measurement,
+                metric,
+                category,
+                tags or {},
+                numeric_value,
+            )
+        except Exception as exc:
+            telemetry_influx_logger.error(
+                "INFLUX measurement=%s metric=%s category=%s error=%s value=%s tags=%s",
+                self.measurement,
+                metric,
+                category,
+                exc,
+                value,
+                tags or {},
+            )
+
+    @staticmethod
+    def _coerce_value(value: Optional[Any]) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+
+telemetry_publisher = TelemetryPublisher()
 
 
 def list_serial_ports() -> list[Dict[str, str]]:
@@ -133,14 +280,17 @@ class SerialClient:
 class ReefController:
     def __init__(self) -> None:
         self.serial = SerialClient(self._handle_line)
+        self.telemetry = telemetry_publisher
         self.connected = False
         self.status_text = "Déconnecté"
         self.last_error: Optional[Dict[str, Any]] = None
         self.response_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.state_lock = threading.Lock()
+        self.state_lock = threading.RLock()
         self.state: Dict[str, Any] = {
-            "tw": "--.-",
-            "ta": "--.-",
+            "temp_1": "--.-",
+            "temp_2": "--.-",
+            "temp_3": "--.-",
+            "temp_4": "--.-",
             "tset_water": 25.0,
             "tset_res": 30.0,
             "heat_hyst": 0.3,
@@ -157,28 +307,29 @@ class ReefController:
             "servo_angle": 10,
             "motors_powered": False,
             "pump_config": {},
+            "peristaltic_state": {"X": False, "Y": False, "Z": False, "E": False},
             "light_state": False,
             "light_auto": True,
             "light_schedule": {
                 day: {"on": "08:00", "off": "20:00"} for day in LIGHT_DAY_KEYS
             },
-            "heat_targets": {"water": 25.0, "reserve": 30.0},
+            "heat_targets": {"temp_1": 25.0, "temp_2": 30.0},
             "heat_auto": True,
             "heat_enabled": True,
-            "heat_state": {"water": True, "reserve": True},
+            "heat_state": {"temp_1": True, "temp_2": True},
             "ph_v": None,
             "ph_raw": None,
             "ph": None,
-            "ty_min": "--.-",
-            "ty_max": "--.-",
             "pump_state": False,
             "fan_on": False,
             "temp_names": {
-                "water": "Eau",
-                "air": "Air",
-                "ymin": "Y-Min",
-                "ymax": "Y-Max",
+                "temp_1": "Temp 1",
+                "temp_2": "Temp 2",
+                "temp_3": "Temp 3",
+                "temp_4": "Temp 4",
             },
+            "feeder_auto": True,
+            "feeder_schedule": [],
         }
         self.global_speed = 300
         self.steps_per_job = 1000
@@ -187,6 +338,7 @@ class ReefController:
         self._ensure_light_schedule_defaults()
         self._load_heat_config()
         self._load_temp_names()
+        self._load_feeder_config()
         self.light_gpio_ready = False
         self.pump_gpio_ready = False
         self.fan_gpio_ready = False
@@ -200,6 +352,10 @@ class ReefController:
         self._drive_heat_gpio(self.state.get("heat_enabled", False))
         self._last_temp_query = 0.0
         self._last_level_query = 0.0
+        self._last_status_query = 0.0
+        self._last_values_push = 0.0
+        self._last_auto_connect_attempt = 0.0
+        self._last_feeder_runs: Dict[str, float] = {}
         self.light_scheduler = threading.Thread(
             target=self._light_scheduler_loop, daemon=True
         )
@@ -208,6 +364,11 @@ class ReefController:
             target=self._telemetry_loop, daemon=True
         )
         self.telemetry_thread.start()
+        self.feeder_scheduler = threading.Thread(
+            target=self._feeder_scheduler_loop, daemon=True
+        )
+        self.feeder_scheduler.start()
+        self._auto_connect_serial()
 
     # ---------- Config ----------
     def _load_configs(self) -> None:
@@ -267,25 +428,78 @@ class ReefController:
         except Exception as exc:
             logger.error("Unable to save temp names: %s", exc)
 
+    def _load_feeder_config(self) -> None:
+        if FEEDER_CONFIG_PATH.exists():
+            try:
+                data = json.loads(FEEDER_CONFIG_PATH.read_text("utf-8"))
+                if isinstance(data, dict):
+                    if isinstance(data.get("schedule"), list):
+                        # Enrich with default method if absent to keep compat
+                        schedule: list[Dict[str, Any]] = []
+                        for entry in data["schedule"]:
+                            if not isinstance(entry, dict):
+                                continue
+                            method = str(entry.get("method", "GET")).upper()
+                            if method not in ("GET", "POST"):
+                                method = "GET"
+                            schedule.append(
+                                {
+                                    "time": entry.get("time", ""),
+                                    "url": entry.get("url", ""),
+                                    "method": method,
+                                }
+                            )
+                        self.state["feeder_schedule"] = schedule
+                    if "auto" in data:
+                        self.state["feeder_auto"] = bool(data.get("auto", True))
+            except Exception as exc:
+                logger.error("Unable to load feeder config: %s", exc)
+
+    def _save_feeder_config(self) -> None:
+        try:
+            FEEDER_CONFIG_PATH.write_text(
+                json.dumps(
+                    {
+                        "auto": self.state.get("feeder_auto", True),
+                        "schedule": self.state.get("feeder_schedule", []),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.error("Unable to save feeder config: %s", exc)
+
     def _load_heat_config(self) -> None:
         if HEAT_CONFIG_PATH.exists():
             try:
                 data = json.loads(HEAT_CONFIG_PATH.read_text("utf-8"))
                 with self.state_lock:
                     if "targets" in data:
+                        t = data["targets"]
+                        if "water" in t:
+                            t["temp_1"] = t.pop("water")
+                        if "reserve" in t:
+                            t["temp_2"] = t.pop("reserve")
+                    if "targets" in data:
                         self.state["heat_targets"].update(data["targets"])
                         self.state["tset_water"] = self.state["heat_targets"].get(
-                            "water", self.state["tset_water"]
+                            "temp_1", self.state["tset_water"]
                         )
                         self.state["tset_res"] = self.state["heat_targets"].get(
-                            "reserve", self.state["tset_res"]
+                            "temp_2", self.state["tset_res"]
                         )
                     if "auto" in data:
                         self.state["heat_auto"] = bool(data["auto"])
                     if "enabled" in data:
                         self.state["heat_enabled"] = bool(data["enabled"])
                     if "state" in data:
-                        self.state["heat_state"].update(data["state"])
+                        st = data["state"]
+                        if "water" in st:
+                            st["temp_1"] = st.pop("water")
+                        if "reserve" in st:
+                            st["temp_2"] = st.pop("reserve")
+                        self.state["heat_state"].update(st)
                     if "hyst" in data:
                         try:
                             self.state["heat_hyst"] = float(data["hyst"])
@@ -438,12 +652,91 @@ class ReefController:
             logger.error("Fan relay write failed: %s", exc)
             self.fan_gpio_ready = False
 
+    def _publish_value(
+        self, metric: str, value: Optional[Any], tags: Optional[Dict[str, Any]] = None
+    ) -> None:
+        if value is None:
+            return
+        telemetry_values_logger.info(
+            "VALUE metric=%s value=%s tags=%s", metric, value, tags or {}
+        )
+        if self.telemetry:
+            self.telemetry.emit(metric, value, category="value", tags=tags)
+
+    def _publish_event(
+        self, name: str, details: Optional[Dict[str, Any]], category: str
+    ) -> None:
+        payload = {"ts": time.time(), "details": details or {}}
+        try:
+            payload_str = json.dumps(payload["details"], ensure_ascii=False)
+        except Exception:
+            payload_str = str(payload["details"])
+        telemetry_events_logger.info(
+            "EVENT category=%s name=%s details=%s", category, name, payload_str
+        )
+        if self.telemetry:
+            self.telemetry.emit(name, 1.0, category=category, details=payload)
+
+    def _publish_user_action(
+        self, name: str, details: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self._publish_event(name, details, "user_action")
+
+    def _publish_automation(
+        self, name: str, details: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self._publish_event(name, details, "automation")
+
+    def _publish_system_event(
+        self, name: str, details: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self._publish_event(name, details, "system")
+
+    def _get_peristaltic_profile(self, axis: str) -> tuple[str, float]:
+        axis_key = axis.upper()
+        with self.state_lock:
+            pump_cfg = {}
+            cfg_root = self.state.get("pump_config", {})
+            if isinstance(cfg_root, dict):
+                pump_cfg = cfg_root.get(axis_key, {}) or {}
+        name = str(pump_cfg.get("name", axis_key))
+        volume_raw = pump_cfg.get("volume_ml", 0.0)
+        try:
+            volume = float(volume_raw or 0.0)
+        except (TypeError, ValueError):
+            volume = 0.0
+        return name, volume
+
+    def _record_peristaltic_dose(
+        self,
+        axis: str,
+        *,
+        source: str,
+        backwards: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        name, volume = self._get_peristaltic_profile(axis)
+        signed_volume = -volume if backwards else volume
+        details: Dict[str, Any] = {
+            "axis": axis.upper(),
+            "name": name,
+            "volume_ml": signed_volume,
+        }
+        if metadata:
+            details.update(metadata)
+        self._publish_value(
+            "peristaltic_dose_ml",
+            signed_volume,
+            {"axis": axis.upper(), "name": name, "source": source},
+        )
+        return details
+
     def _evaluate_fan(self) -> None:
         with self.state_lock:
             auto = self.state.get("auto_fan", True)
             thresh = float(self.state.get("auto_thresh", 28.0) or 28.0)
             current = self.state.get("fan_on", False)
-            t_water = self.state.get("tw")
+            t_water = self.state.get("temp_1")
         if not auto:
             # Manual mode: do nothing here
             return
@@ -456,15 +749,23 @@ class ReefController:
                 self.state["fan_on"] = desired
                 self.state["fan"] = 255 if desired else 0
             self._drive_fan_gpio(desired)
+            self._publish_automation(
+                "fan_auto_toggle",
+                {"from": current, "to": desired, "threshold": thresh},
+            )
 
     def toggle_pump(self, state: Optional[bool] = None) -> None:
         with self.state_lock:
+            prev_state = bool(self.state.get("pump_state", False))
             if state is None:
-                new_state = not self.state.get("pump_state", False)
+                new_state = not prev_state
             else:
                 new_state = bool(state)
             self.state["pump_state"] = new_state
         self._drive_pump_gpio(new_state)
+        self._publish_user_action(
+            "pump_manual_toggle", {"from": prev_state, "to": new_state}
+        )
 
     def _drive_light_gpio(self, enabled: bool) -> None:
         if not self.light_gpio_ready or GPIO is None:
@@ -486,8 +787,8 @@ class ReefController:
     def _telemetry_loop(self) -> None:
         while True:
             try:
+                now = time.time()
                 if self.connected:
-                    now = time.time()
                     if now - self._last_temp_query > 2.0:
                         self._last_temp_query = now
                         try:
@@ -500,11 +801,285 @@ class ReefController:
                             self.read_levels_once()
                         except Exception as exc:
                             logger.debug("LEVEL? query failed: %s", exc)
+                    if now - self._last_status_query > 5.0:
+                        self._last_status_query = now
+                        try:
+                            self._send_query("STATUS?")
+                        except Exception as exc:
+                            logger.debug("STATUS? query failed: %s", exc)
                     self._evaluate_fan()
+                else:
+                    if now - self._last_auto_connect_attempt > 10.0:
+                        self._last_auto_connect_attempt = now
+                        self._auto_connect_serial()
+                if now - self._last_values_push >= VALUES_POST_PERIOD:
+                    self._last_values_push = now
+                    self._post_values()
                 time.sleep(1.0)
             except Exception as exc:
                 logger.error("Telemetry loop error: %s", exc)
                 time.sleep(2.0)
+
+    def _build_temperature_payload(self) -> list[Dict[str, Any]]:
+        with self.state_lock:
+            temps = {
+                "temp_1": self.state.get("temp_1"),
+                "temp_2": self.state.get("temp_2"),
+                "temp_3": self.state.get("temp_3"),
+                "temp_4": self.state.get("temp_4"),
+            }
+            temp_names = self.state.get("temp_names", {}).copy()
+        payload = []
+        for key, raw in temps.items():
+            payload.append(
+                {
+                    "key": key,
+                    "name": temp_names.get(key, key),
+                    "value": self._parse_temperature_value(raw),
+                }
+            )
+        return payload
+
+    def _feeder_scheduler_loop(self) -> None:
+        while True:
+            try:
+                with self.state_lock:
+                    auto = self.state.get("feeder_auto", True)
+                    schedule = list(self.state.get("feeder_schedule", []))
+                if auto and schedule:
+                    now = time.localtime()
+                    for entry in schedule:
+                        if not isinstance(entry, dict):
+                            continue
+                        time_text = str(entry.get("time", "")).strip()
+                        url = entry.get("url", "")
+                        method = str(entry.get("method", "GET")).upper()
+                        if method not in ("GET", "POST"):
+                            method = "GET"
+                        try:
+                            hh, mm = time_text.split(":", 1)
+                            hh_i = int(hh)
+                            mm_i = int(mm)
+                        except Exception:
+                            continue
+                        if not (0 <= hh_i < 24 and 0 <= mm_i < 60):
+                            continue
+                        if now.tm_hour != hh_i or now.tm_min != mm_i:
+                            continue
+                        key = f"{hh_i:02d}:{mm_i:02d}|{method}|{url}"
+                        last_run = self._last_feeder_runs.get(key, 0)
+                        # avoid double fire within same minute (loop runs every 10s)
+                        if time.time() - last_run < 70:
+                            continue
+                        self._last_feeder_runs[key] = time.time()
+                        if url:
+                            url_norm = self._normalize_url(url)
+                            telemetry_events_logger.info(
+                                "Feeder scheduled trigger %s %s key=%s",
+                                method,
+                                url_norm,
+                                key,
+                            )
+                            threading.Thread(
+                                target=self._trigger_feeder_url,
+                                args=(url_norm, key, method),
+                                daemon=True,
+                            ).start()
+                time.sleep(10)
+            except Exception as exc:
+                logger.error("Feeder scheduler error: %s", exc)
+                time.sleep(5)
+
+    def _trigger_feeder_url(self, url: str, key: str, method: str = "GET") -> None:
+        method_norm = method.upper() if isinstance(method, str) else "GET"
+        if method_norm not in ("GET", "POST"):
+            method_norm = "GET"
+        origin = "user_action" if isinstance(key, str) and key.startswith("manual|") else "automation"
+        try:
+            if method_norm == "POST":
+                resp = requests.post(url, timeout=REQUEST_TIMEOUT)
+            else:
+                resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+            telemetry_events_logger.info(
+                "Feeder trigger %s %s status=%s key=%s",
+                method_norm,
+                url,
+                resp.status_code,
+                key,
+            )
+            details = {
+                "url": url,
+                "status": resp.status_code,
+                "key": key,
+                "method": method_norm,
+            }
+            if origin == "user_action":
+                self._publish_user_action("feeder_trigger", details)
+            else:
+                self._publish_automation("feeder_trigger", details)
+        except Exception as exc:
+            telemetry_events_logger.error(
+                "Feeder trigger error %s %s key=%s: %s", method_norm, url, key, exc
+            )
+            details = {
+                "url": url,
+                "key": key,
+                "method": method_norm,
+                "error": str(exc),
+            }
+            if origin == "user_action":
+                self._publish_user_action("feeder_trigger_error", details)
+            else:
+                self._publish_automation("feeder_trigger_error", details)
+
+    def _normalize_url(self, url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme:
+            return url
+        return f"http://{url.lstrip('/')}"
+
+    def _build_values_payload(self) -> Dict[str, Any]:
+        with self.state_lock:
+            levels = {
+                "low": self.state.get("lvl_low"),
+                "high": self.state.get("lvl_high"),
+                "alert": self.state.get("lvl_alert"),
+            }
+            pump_active = bool(self.state.get("pump_state", False))
+            motors_powered = bool(self.state.get("motors_powered", False))
+            light_on = bool(self.state.get("light_state", False))
+            heat_on = bool(self.state.get("heat_enabled", False))
+            heat_state = self.state.get("heat_state", {}).copy()
+            fan_on = bool(self.state.get("fan_on", False))
+            fan_value = self.state.get("fan", 0)
+            ph = self.state.get("ph")
+            ph_v = self.state.get("ph_v")
+            ph_raw = self.state.get("ph_raw")
+            pump_cfg_raw = self.state.get("pump_config", {})
+            pump_cfg = pump_cfg_raw.copy() if isinstance(pump_cfg_raw, dict) else {}
+            peristaltic_state = self.state.get("peristaltic_state", {})
+            peristaltic = []
+            for axis_key in ("X", "Y", "Z", "E"):
+                cfg = pump_cfg.get(axis_key, {}) if isinstance(pump_cfg, dict) else {}
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                powered = bool(peristaltic_state.get(axis_key, motors_powered))
+                peristaltic.append(
+                    {
+                        "axis": axis_key,
+                        "name": cfg.get("name", axis_key),
+                        "powered": powered,
+                    }
+                )
+        return {
+            "ts": time.time(),
+            "temperatures": self._build_temperature_payload(),
+            "levels": levels,
+            "pumps": {"main": pump_active, "motors_powered": motors_powered},
+            "peristaltic": peristaltic,
+            "relays": {"light": light_on, "heat": heat_on, "fan": fan_on},
+            "heat_state": heat_state,
+            "fan": {"on": fan_on, "value": fan_value},
+            "ph": {"value": ph, "voltage": ph_v, "raw": ph_raw},
+        }
+
+    def _post_values(self) -> None:
+        payload = self._build_values_payload()
+        try:
+            temperatures = payload.get("temperatures", [])
+            if isinstance(temperatures, list):
+                for entry in temperatures:
+                    if not isinstance(entry, dict):
+                        continue
+                    self._publish_value(
+                        "temperature_celsius",
+                        entry.get("value"),
+                        {
+                            "sensor": str(entry.get("key", "")),
+                            "name": str(entry.get("name", "")),
+                        },
+                    )
+
+            ph_data = payload.get("ph", {})
+            if isinstance(ph_data, dict):
+                self._publish_value("ph_value", ph_data.get("value"))
+                self._publish_value("ph_voltage", ph_data.get("voltage"))
+                self._publish_value("ph_raw", ph_data.get("raw"))
+
+            levels = payload.get("levels", {})
+            if isinstance(levels, dict):
+                for level_name, level_value in levels.items():
+                    self._publish_value(
+                        "water_level_state",
+                        level_value,
+                        {"sensor": str(level_name)},
+                    )
+
+            fan_data = payload.get("fan", {})
+            if isinstance(fan_data, dict):
+                self._publish_value("fan_pwm_value", fan_data.get("value"))
+                self._publish_value("fan_state", 1 if fan_data.get("on") else 0)
+
+            pumps = payload.get("pumps", {})
+            if isinstance(pumps, dict):
+                for pump_name, pump_state in pumps.items():
+                    self._publish_value(
+                        "pump_state",
+                        1 if pump_state else 0,
+                        {"pump": str(pump_name)},
+                    )
+
+            peristaltic = payload.get("peristaltic", [])
+            if isinstance(peristaltic, list):
+                for pump_entry in peristaltic:
+                    if not isinstance(pump_entry, dict):
+                        continue
+                    self._publish_value(
+                        "peristaltic_power_state",
+                        1 if pump_entry.get("powered") else 0,
+                        {
+                            "axis": str(pump_entry.get("axis", "")),
+                            "name": str(pump_entry.get("name", "")),
+                        },
+                    )
+
+            relays = payload.get("relays", {})
+            if isinstance(relays, dict):
+                for relay_name, relay_state in relays.items():
+                    self._publish_value(
+                        "relay_state",
+                        1 if relay_state else 0,
+                        {"relay": str(relay_name)},
+                    )
+
+            heat_state = payload.get("heat_state", {})
+            if isinstance(heat_state, dict):
+                for zone, state in heat_state.items():
+                    self._publish_value(
+                        "heat_zone_state",
+                        1 if state else 0,
+                        {"zone": str(zone)},
+                    )
+        except Exception as exc:
+            logger.error("Erreur lors de la préparation des mesures InfluxDB: %s", exc)
+
+    def _auto_connect_serial(self) -> None:
+        """Auto-connect to the first available Mega on common ACM ports."""
+        if self.connected:
+            return
+        for port in ("/dev/ttyACM0", "/dev/ttyACM1"):
+            try:
+                if not Path(port).exists():
+                    continue
+                logger.info("Auto-connecting to %s", port)
+                self.connect(port)
+                logger.info("Auto-connected to %s", port)
+                return
+            except Exception as exc:
+                logger.info("Auto-connect failed on %s: %s", port, exc)
+        logger.info(
+            "Auto-connect skipped: no /dev/ttyACM[0-1] detected or connection failed"
+        )
 
     def _tick_light_schedule(self) -> None:
         with self.state_lock:
@@ -547,6 +1122,10 @@ class ReefController:
         if should_on != current:
             logger.info("Light schedule toggling to %s for %s", should_on, day_key)
             self.toggle_light(should_on)
+            self._publish_automation(
+                "light_schedule_toggle",
+                {"from": current, "to": should_on, "day": day_key},
+            )
 
     # ---------- Serial helpers ----------
     def _handle_line(self, line: str) -> None:
@@ -602,7 +1181,14 @@ class ReefController:
                 key, value = entry.split("=", 1)
                 key = key.lower()
                 if key == "mtr":
-                    self.state["motors_powered"] = value in ("1", "ON", "TRUE")
+                    prev = bool(self.state.get("motors_powered", False))
+                    new_state = value in ("1", "ON", "TRUE")
+                    self.state["motors_powered"] = new_state
+                    if new_state != prev:
+                        self._publish_system_event(
+                            "pump_motor_state",
+                            {"from": prev, "to": new_state, "source": "status_line"},
+                        )
                 elif key == "fan_val":
                     try:
                         val = int(float(value))
@@ -632,20 +1218,20 @@ class ReefController:
                 elif key == "level_alert":
                     self.state["lvl_alert"] = value
                 elif key == "tempw":
-                    self.state["tw"] = self._sanitize_temp_text(
-                        value, self.state.get("tw", "--.-")
+                    self.state["temp_1"] = self._sanitize_temp_text(
+                        value, self.state.get("temp_1", "--.-")
                     )
                 elif key == "tempa":
-                    self.state["ta"] = self._sanitize_temp_text(
-                        value, self.state.get("ta", "--.-")
+                    self.state["temp_3"] = self._sanitize_temp_text(
+                        value, self.state.get("temp_3", "--.-")
                     )
                 elif key == "tempymin":
-                    self.state["ty_min"] = self._sanitize_temp_text(
-                        value, self.state.get("ty_min", "--.-")
+                    self.state["temp_4"] = self._sanitize_temp_text(
+                        value, self.state.get("temp_4", "--.-")
                     )
                 elif key == "tempymax":
-                    self.state["ty_max"] = self._sanitize_temp_text(
-                        value, self.state.get("ty_max", "--.-")
+                    self.state["temp_2"] = self._sanitize_temp_text(
+                        value, self.state.get("temp_2", "--.-")
                     )
                 elif key == "ph_v":
                     try:
@@ -663,6 +1249,26 @@ class ReefController:
                         self.state["servo_angle"] = int(float(value))
                     except ValueError:
                         pass
+                elif key in ("mtrx", "mtry", "mtrx", "mtre", "mtrz"):
+                    axis_map = {"mtrx": "X", "mtry": "Y", "mtrz": "Z", "mtre": "E"}
+                    axis_key = axis_map.get(key)
+                    if axis_key:
+                        prev = bool(self.state.get("peristaltic_state", {}).get(axis_key, False))
+                        new_state = value in ("1", "ON", "TRUE", "true", "on")
+                        self.state.setdefault("peristaltic_state", {})[axis_key] = new_state
+                        if new_state != prev:
+                            self._publish_system_event(
+                                "peristaltic_state",
+                                {"axis": axis_key, "from": prev, "to": new_state, "source": "status_line"},
+                            )
+                            if new_state:
+                                details = self._record_peristaltic_dose(
+                                    axis_key,
+                                    source="automation",
+                                    backwards=False,
+                                    metadata={"reason": "status_line"},
+                                )
+                                self._publish_automation("peristaltic_auto_run", details)
 
     def _apply_temp_line(self, line: str) -> None:
         payload = line.replace("C", "")
@@ -673,17 +1279,17 @@ class ReefController:
                 k, v = part.split(":", 1)
                 vals[k.strip().lower()] = v.strip()
         with self.state_lock:
-            self.state["tw"] = self._sanitize_temp_text(
-                vals.get("t_water"), self.state.get("tw", "--.-")
+            self.state["temp_1"] = self._sanitize_temp_text(
+                vals.get("t_water"), self.state.get("temp_1", "--.-")
             )
-            self.state["ta"] = self._sanitize_temp_text(
-                vals.get("t_air"), self.state.get("ta", "--.-")
+            self.state["temp_3"] = self._sanitize_temp_text(
+                vals.get("t_air"), self.state.get("temp_3", "--.-")
             )
-            self.state["ty_min"] = self._sanitize_temp_text(
-                vals.get("t_ymin"), self.state.get("ty_min", "--.-")
+            self.state["temp_4"] = self._sanitize_temp_text(
+                vals.get("t_ymin"), self.state.get("temp_4", "--.-")
             )
-            self.state["ty_max"] = self._sanitize_temp_text(
-                vals.get("t_ymax"), self.state.get("ty_max", "--.-")
+            self.state["temp_2"] = self._sanitize_temp_text(
+                vals.get("t_ymax"), self.state.get("temp_2", "--.-")
             )
             try:
                 self.state["ph_v"] = float(vals.get("ph_v", self.state.get("ph_v")))
@@ -730,10 +1336,10 @@ class ReefController:
         with self.state_lock:
             targets = self.state.get("heat_targets", {}).copy()
             states = self.state.get("heat_state", {}).copy()
-        cmd_water = targets.get("water", 0.0) if states.get("water") else 0.0
-        cmd_res = targets.get("reserve", 0.0) if states.get("reserve") else 0.0
-        # Pilotage via relais GPIO (NC) : ON si une zone chauffe
-        heat_on = cmd_water > 0  # seule l'eau décide du relais
+        cmd_water = targets.get("temp_1", 0.0) if states.get("temp_1") else 0.0
+        cmd_res = targets.get("temp_2", 0.0) if states.get("temp_2") else 0.0
+        # Pilotage via relais GPIO (NC) : ON si temp_1 chauffe
+        heat_on = cmd_water > 0
         self._drive_heat_gpio(heat_on)
 
     def _parse_temperature_value(self, raw: Any) -> Optional[float]:
@@ -753,13 +1359,13 @@ class ReefController:
                 return
             targets = self.state.get("heat_targets", {}).copy()
             temps = {
-                "water": self.state.get("tw"),
-                # Réserve pilotée par la sonde Y-MAX
-                "reserve": self.state.get("ty_max"),
+                "temp_1": self.state.get("temp_1"),
+                "temp_2": self.state.get("temp_2"),
             }
             states = self.state.get("heat_state", {}).copy()
         hysteresis = float(self.state.get("heat_hyst", 0.3) or 0.3)
         updated = False
+        prev_states = states.copy()
         for zone, temp_raw in temps.items():
             target = float(targets.get(zone, 0) or 0)
             temp_val = self._parse_temperature_value(temp_raw)
@@ -782,12 +1388,22 @@ class ReefController:
                 self.state["heat_enabled"] = any(states.values())
             self._save_heat_config()
             self._update_heater_outputs()
+            self._publish_automation(
+                "heat_auto_toggle",
+                {
+                    "from": prev_states,
+                    "to": states,
+                    "heat_enabled": any(states.values()),
+                    "hysteresis": hysteresis,
+                },
+            )
 
     def set_heat_hyst(self, value: float) -> None:
         with self.state_lock:
             self.state["heat_hyst"] = value
         self._save_heat_config()
         self._evaluate_heat_needs()
+        self._publish_user_action("heat_hysteresis_update", {"value": value})
 
     def _sanitize_temp_text(self, raw: Any, fallback: str) -> str:
         try:
@@ -826,8 +1442,10 @@ class ReefController:
             self._apply_status_line(status.split(";", 1)[1])
         logger.info("Mega connecté (%s)", hello)
         self._apply_heat_targets()
+        self._publish_system_event("serial_connect", {"port": port})
 
     def disconnect(self) -> None:
+        port = self.serial.port
         self.serial.close()
         self.connected = False
         self._last_temp_query = 0.0
@@ -835,6 +1453,7 @@ class ReefController:
         self.status_text = "Déconnecté"
         self._drive_heat_gpio(False)
         self._drive_fan_gpio(False)
+        self._publish_system_event("serial_disconnect", {"port": port})
 
     # ---------- Actions exposed to API ----------
     def read_temps_once(self) -> None:
@@ -846,35 +1465,43 @@ class ReefController:
     def set_water(self, value: float) -> None:
         with self.state_lock:
             self.state["tset_water"] = value
-            self.state["heat_targets"]["water"] = value
+            self.state["heat_targets"]["temp_1"] = value
         self._save_heat_config()
         if self.state.get("heat_auto", True):
             self._evaluate_heat_needs()
         else:
             self._update_heater_outputs()
+        self._publish_user_action("heat_target_water_update", {"value": value})
 
     def set_reserve(self, value: float) -> None:
         with self.state_lock:
             self.state["tset_res"] = value
-            self.state["heat_targets"]["reserve"] = value
+            self.state["heat_targets"]["temp_2"] = value
         self._save_heat_config()
         if self.state.get("heat_auto", True):
             self._evaluate_heat_needs()
         else:
             self._update_heater_outputs()
+        self._publish_user_action("heat_target_reserve_update", {"value": value})
 
     def set_autocool(self, thresh: float) -> None:
         with self.state_lock:
             self.state["auto_thresh"] = thresh
             self.state["auto_fan"] = True
         self._evaluate_fan()
+        self._publish_user_action("fan_auto_threshold_update", {"threshold": thresh})
 
     def set_fan_manual(self, value: int) -> None:
         with self.state_lock:
+            prev = bool(self.state.get("fan_on", False))
             self.state["auto_fan"] = False
             self.state["fan_on"] = bool(value)
             self.state["fan"] = 255 if value else 0
+            new = self.state["fan_on"]
         self._drive_fan_gpio(bool(value))
+        self._publish_user_action(
+            "fan_manual_toggle", {"from": prev, "to": new, "value": int(bool(value))}
+        )
 
     def set_auto_fan(self, enable: bool) -> None:
         if enable:
@@ -887,17 +1514,21 @@ class ReefController:
                 self.state["fan_on"] = False
                 self.state["fan"] = 0
             self._drive_fan_gpio(False)
+        self._publish_user_action("fan_auto_mode_update", {"enable": enable})
 
     def update_temp_names(self, names: Dict[str, str]) -> None:
         if not isinstance(names, dict):
             return
-        allowed = {"water", "air", "aux", "ymin", "ymax"}
+        allowed = {"temp_1", "temp_2", "temp_3", "temp_4"}
         with self.state_lock:
             current = self.state.setdefault("temp_names", {})
             for key, val in names.items():
                 if key in allowed and isinstance(val, str) and val.strip():
                     current[key] = val.strip()
         self._save_temp_names()
+        self._publish_user_action(
+            "temperature_names_update", {"names": {k: v for k, v in names.items() if k in allowed}}
+        )
 
     def set_heat_mode(self, auto: bool) -> None:
         with self.state_lock:
@@ -905,43 +1536,55 @@ class ReefController:
         self._save_heat_config()
         if auto:
             self._evaluate_heat_needs()
+        self._publish_user_action("heat_mode_update", {"auto": auto})
 
     def set_heat_power(self, enable: bool) -> None:
         with self.state_lock:
+            prev = bool(self.state.get("heat_enabled", False))
             if self.state.get("heat_auto", True) and not enable:
                 raise RuntimeError("Désactiver impossible en mode automatique")
             self.state["heat_enabled"] = enable
             self.state["heat_state"]["water"] = enable
             self.state["heat_state"]["reserve"] = enable
+            new = bool(self.state["heat_enabled"])
         self._save_heat_config()
         self._update_heater_outputs()
+        self._publish_user_action("heat_manual_toggle", {"from": prev, "to": new})
 
     def toggle_protect(self, enable: bool) -> None:
         with self.state_lock:
             self.state["protect"] = enable
+        self._publish_user_action("protect_mode_update", {"enable": enable})
 
     def set_servo(self, angle: int) -> None:
         with self.state_lock:
             self.state["servo_angle"] = angle
         self._send_command(f"SERVO {angle}")
+        self._publish_user_action("servo_angle_set", {"angle": angle})
 
     def dispense_macro(self) -> None:
         self._send_command("SERVOFEED")
+        self._publish_user_action("servo_macro_dispense", None)
 
     def set_mtr_auto_off(self, enable: bool) -> None:
         with self.state_lock:
             self.state["mtr_auto_off"] = enable
+        self._publish_user_action("motor_auto_off_update", {"enable": enable})
 
     def set_steps_speed(self, steps: int, speed: int) -> None:
         with self.state_lock:
             self.steps_per_job = steps
             self.state["steps"] = steps
             self.state["speed"] = speed
+        self._publish_user_action(
+            "pump_steps_speed_update", {"steps": steps, "speed": speed}
+        )
 
     def set_global_speed(self, speed: int) -> None:
         with self.state_lock:
             self.global_speed = speed
             self.state["speed"] = speed
+        self._publish_user_action("global_speed_update", {"speed": speed})
 
     def pump(self, axis: str, backwards: bool = False) -> None:
         axis = axis.upper()
@@ -954,13 +1597,26 @@ class ReefController:
         if protect and str(low) in ("1", "LOW", "true"):
             raise RuntimeError("Niveau bas - pompe bloquée")
         signed_steps = -steps if backwards else steps
-        self._send_command(f"PUMP {axis} {signed_steps} {max(speed, 50)}")
+        command_speed = max(speed, 50)
+        self._send_command(f"PUMP {axis} {signed_steps} {command_speed}")
         if auto_off:
             threading.Thread(
                 target=self._auto_motor_off_delay,
-                args=(abs(steps), max(speed, 50)),
+                args=(abs(steps), command_speed),
                 daemon=True,
             ).start()
+        dose_details = self._record_peristaltic_dose(
+            axis,
+            source="user",
+            backwards=backwards,
+            metadata={
+                "backwards": backwards,
+                "steps": steps,
+                "speed": command_speed,
+                "auto_off": auto_off,
+            },
+        )
+        self._publish_user_action("pump_manual_run", dose_details)
 
     def _auto_motor_off_delay(self, steps: int, speed: int) -> None:
         duration = (steps * speed * 2) / 1_000_000.0
@@ -972,6 +1628,7 @@ class ReefController:
 
     def emergency_stop(self) -> None:
         self._send_command("MTR OFF")
+        self._publish_user_action("emergency_stop", None)
 
     def update_pump_config(
         self,
@@ -992,6 +1649,15 @@ class ReefController:
             if direction in (1, -1):
                 cfg["direction"] = direction
         self._save_pump_config()
+        self._publish_user_action(
+            "pump_config_update",
+            {
+                "axis": axis,
+                "name": name,
+                "volume_ml": volume_ml,
+                "direction": direction,
+            },
+        )
 
     def update_light_schedule(
         self, day: str, on_time: Optional[str], off_time: Optional[str]
@@ -1009,20 +1675,78 @@ class ReefController:
             if off_time is not None:
                 entry["off"] = off_time
         self._save_light_schedule()
+        self._publish_user_action(
+            "light_schedule_update",
+            {"day": key, "on": on_time, "off": off_time},
+        )
 
-    def toggle_light(self, state: Optional[bool] = None) -> None:
+    def toggle_light(
+        self, state: Optional[bool] = None, event_type: Optional[str] = None
+    ) -> None:
         if isinstance(state, str):
             state = state.strip().lower() in ("1", "true", "on")
         with self.state_lock:
+            prev = bool(self.state.get("light_state", False))
             if state is None:
-                self.state["light_state"] = not self.state["light_state"]
+                self.state["light_state"] = not prev
             else:
-                self.state["light_state"] = state
+                self.state["light_state"] = bool(state)
+            new = bool(self.state["light_state"])
         self._drive_light_gpio(self.state["light_state"])
+        if event_type:
+            self._publish_user_action(event_type, {"from": prev, "to": new})
 
     def set_light_auto(self, enable: bool) -> None:
         with self.state_lock:
             self.state["light_auto"] = enable
+        self._publish_user_action("light_auto_mode_update", {"enable": enable})
+
+    def set_feeder_auto(self, enable: bool) -> None:
+        with self.state_lock:
+            self.state["feeder_auto"] = bool(enable)
+        self._save_feeder_config()
+        self._publish_user_action("feeder_auto_mode_update", {"enable": enable})
+
+    def update_feeder_schedule(self, entries: list[Dict[str, Any]]) -> None:
+        valid = []
+        if isinstance(entries, list):
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                time_str = str(item.get("time", "")).strip()
+                url_str = str(item.get("url", "")).strip()
+                method = str(item.get("method", "GET")).upper()
+                if not time_str or not url_str:
+                    continue
+                # simple validation HH:MM
+                try:
+                    hh, mm = time_str.split(":", 1)
+                    hh_i = int(hh)
+                    mm_i = int(mm)
+                    if not (0 <= hh_i < 24 and 0 <= mm_i < 60):
+                        continue
+                except Exception:
+                    continue
+                if method not in ("GET", "POST"):
+                    method = "GET"
+                valid.append(
+                    {"time": f"{hh_i:02d}:{mm_i:02d}", "url": url_str, "method": method}
+                )
+        with self.state_lock:
+            self.state["feeder_schedule"] = valid
+        self._save_feeder_config()
+        self._publish_user_action(
+            "feeder_schedule_update", {"count": len(valid), "entries": valid}
+        )
+
+    def trigger_feeder_url(self, url: str, method: str = "GET") -> None:
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("URL manquante")
+        method_norm = method.upper() if isinstance(method, str) else "GET"
+        if method_norm not in ("GET", "POST"):
+            method_norm = "GET"
+        clean_url = url.strip()
+        self._trigger_feeder_url(clean_url, f"manual|{method_norm}|{clean_url}", method_norm)
 
     def raw(self, cmd: str) -> None:
         self._send_command(cmd)

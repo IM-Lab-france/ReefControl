@@ -20,6 +20,12 @@ let refreshIntervalMs = 5000;
 let loaderTimer = null;
 let nextRefreshAt = 0;
 let inputsInitialized = false;
+let currentFeederAuto = true;
+let currentFeederSchedule = [];
+let feederInitialized = false;
+let feederDirty = false;
+let lastFeederScheduleJson = "[]";
+let toastContainer = null;
 
 async function apiAction(action, params = {}) {
   try {
@@ -32,10 +38,11 @@ async function apiAction(action, params = {}) {
     if (!res.ok || !data.ok) {
       throw new Error(data.error || res.statusText);
     }
+    showToast(`Action ${action} OK`, "success");
     return data;
   } catch (err) {
     console.error("Action", action, err);
-    alert("Erreur: " + err.message);
+    showToast(`Erreur ${action}: ${err.message}`, "danger");
     throw err;
   }
 }
@@ -275,14 +282,10 @@ function applyStateToUI(state) {
     errBox.classList.add("d-none");
   }
 
-  document.getElementById("tw_val").textContent = `${state.tw || "--.-"}°C`;
-  document.getElementById("ta_val").textContent = `${state.ta || "--.-"}°C`;
-  document.getElementById("tymin_val").textContent = `${
-    state.ty_min || "--.-"
-  }°C`;
-  document.getElementById("tymax_val").textContent = `${
-    state.ty_max || "--.-"
-  }°C`;
+  document.getElementById("temp1_val").textContent = `${state.temp_1 || "--.-"}°C`;
+  document.getElementById("temp2_val").textContent = `${state.temp_2 || "--.-"}°C`;
+  document.getElementById("temp3_val").textContent = `${state.temp_3 || "--.-"}°C`;
+  document.getElementById("temp4_val").textContent = `${state.temp_4 || "--.-"}°C`;
   const phV = state.ph_v ?? state.phV ?? null;
   const phRaw = state.ph_raw ?? state.phRaw ?? null;
   document.getElementById("ph_v_val").textContent =
@@ -298,18 +301,18 @@ function applyStateToUI(state) {
     const el = document.getElementById(id);
     if (el) el.textContent = val;
   };
-  mirrorLabel("tw_label", tname("water", "Eau"));
-  mirrorLabel("ta_label", tname("air", "Air"));
-  mirrorLabel("tymin_label", tname("ymin", "Y-Min"));
-  mirrorLabel("tymax_label", tname("ymax", "Y-Max"));
-  mirrorLabel("tymin_label2", tname("ymin", "Y-Min"));
-  mirrorLabel("tymax_label2", tname("ymax", "Y-Max"));
+  mirrorLabel("temp1_label", tname("temp_1", "Temp 1"));
+  mirrorLabel("temp2_label", tname("temp_2", "Temp 2"));
+  mirrorLabel("temp3_label", tname("temp_3", "Temp 3"));
+  mirrorLabel("temp4_label", tname("temp_4", "Temp 4"));
+  mirrorLabel("temp2_label2", tname("temp_2", "Temp 2"));
+  mirrorLabel("temp4_label2", tname("temp_4", "Temp 4"));
   const mirrorVal = (id, val, suffix = "°C") => {
     const el = document.getElementById(id);
     if (el) el.textContent = `${val || "--.-"}${suffix}`;
   };
-  mirrorVal("tymin_val2", state.ty_min);
-  mirrorVal("tymax_val2", state.ty_max);
+  mirrorVal("temp2_val2", state.temp_2);
+  mirrorVal("temp4_val2", state.temp_4);
   const pumpLabel = document.getElementById("pumpStateLabel");
   const pumpBtn = document.getElementById("pumpToggleBtn");
   if (pumpLabel)
@@ -321,23 +324,23 @@ function applyStateToUI(state) {
     pumpBtn.classList.toggle("btn-outline-light", state.pump_state);
   }
   if (!inputsInitialized) {
-    setInputValue("tempName_water", tname("water", "Eau"));
-    setInputValue("tempName_air", tname("air", "Air"));
-    setInputValue("tempName_ymin", tname("ymin", "Y-Min"));
-    setInputValue("tempName_ymax", tname("ymax", "Y-Max"));
+    setInputValue("tempName_temp1", tname("temp_1", "Temp 1"));
+    setInputValue("tempName_temp2", tname("temp_2", "Temp 2"));
+    setInputValue("tempName_temp3", tname("temp_3", "Temp 3"));
+    setInputValue("tempName_temp4", tname("temp_4", "Temp 4"));
     setInputValue("heatHyst", state.heat_hyst ?? 0.3);
     setInputValue("refreshInterval", (refreshIntervalMs / 1000).toString());
   }
   const heatTargets = state.heat_targets || {};
   document.getElementById("tset_water_label").textContent = `${
-    heatTargets.water ?? state.tset_water ?? "--.-"
+    heatTargets.temp_1 ?? state.tset_water ?? "--.-"
   }°C`;
   document.getElementById("tset_res_label").textContent = `${
-    heatTargets.reserve ?? state.tset_res ?? "--.-"
+    heatTargets.temp_2 ?? state.tset_res ?? "--.-"
   }°C`;
   if (!inputsInitialized) {
-    setInputIfIdle("tset_water2", heatTargets.water ?? state.tset_water ?? "");
-    setInputIfIdle("tset_res2", heatTargets.reserve ?? state.tset_res ?? "");
+    setInputIfIdle("tset_water2", heatTargets.temp_1 ?? state.tset_water ?? "");
+    setInputIfIdle("tset_res2", heatTargets.temp_2 ?? state.tset_res ?? "");
   }
 
 
@@ -392,6 +395,28 @@ function applyStateToUI(state) {
   currentHeatAuto = !!state.heat_auto;
   currentHeatEnabled = !!state.heat_enabled;
   updateHeatUI();
+
+  // Feeder
+  const incomingSchedule = Array.isArray(state.feeder_schedule)
+    ? state.feeder_schedule.map((entry) => {
+        const method = (entry?.method || "GET").toString().toUpperCase();
+        return {
+          time: entry?.time || "",
+          url: entry?.url || "",
+          method: method === "POST" ? "POST" : "GET",
+        };
+      })
+    : [];
+  const incomingJson = JSON.stringify(incomingSchedule);
+  currentFeederAuto = !!state.feeder_auto;
+  // Ne réécrit les inputs que si jamais initialisé ou si pas en édition locale
+  if (!feederInitialized || (!feederDirty && incomingJson !== lastFeederScheduleJson)) {
+    currentFeederSchedule = incomingSchedule;
+    lastFeederScheduleJson = incomingJson;
+    renderFeederSchedule();
+    feederInitialized = true;
+    feederDirty = false;
+  }
   inputsInitialized = true;
 }
 
@@ -461,7 +486,8 @@ function updateLightUI(state) {
 
 function setInputValue(id, value) {
   const input = document.getElementById(id);
-  if (input && !input.matches(":focus")) {
+  if (inputsInitialized) return;
+  if (input) {
     input.value = value ?? "";
   }
 }
@@ -529,11 +555,10 @@ function resetRefreshLoader() {
 
 async function saveTempNames() {
   const payload = {
-    water: document.getElementById("tempName_water")?.value || "",
-    air: document.getElementById("tempName_air")?.value || "",
-    aux: document.getElementById("tempName_aux")?.value || "",
-    ymin: document.getElementById("tempName_ymin")?.value || "",
-    ymax: document.getElementById("tempName_ymax")?.value || "",
+    temp_1: document.getElementById("tempName_temp1")?.value || "",
+    temp_2: document.getElementById("tempName_temp2")?.value || "",
+    temp_3: document.getElementById("tempName_temp3")?.value || "",
+    temp_4: document.getElementById("tempName_temp4")?.value || "",
   };
   await apiAction("update_temp_names", payload);
   refreshState();
@@ -581,6 +606,87 @@ function applyRefreshInterval() {
   restartRefreshTimer();
 }
 
+function renderFeederSchedule() {
+  const body = document.getElementById("feederTableBody");
+  if (!body) return;
+  body.innerHTML = "";
+  const autoToggle = document.getElementById("feederAutoToggle");
+  if (autoToggle) autoToggle.checked = !!currentFeederAuto;
+  const rows = currentFeederSchedule.length ? currentFeederSchedule : [];
+  if (rows.length === 0) {
+    addFeederRow();
+  } else {
+    rows.forEach((row, idx) => {
+      addFeederRow(row.time || "", row.url || "", row.method || "GET", idx);
+    });
+  }
+}
+
+function addFeederRow(timeVal = "", urlVal = "", methodVal = "GET", idx = null) {
+  const body = document.getElementById("feederTableBody");
+  if (!body) return;
+  const tr = document.createElement("tr");
+  const methodClean = (methodVal || "GET").toString().toUpperCase();
+  tr.innerHTML = `
+    <td><input type="time" class="form-control form-control-sm feeder-time" value="${timeVal}"></td>
+    <td>
+      <select class="form-select form-select-sm feeder-method">
+        <option value="GET"${methodClean === "GET" ? " selected" : ""}>GET</option>
+        <option value="POST"${methodClean === "POST" ? " selected" : ""}>POST</option>
+      </select>
+    </td>
+    <td><input type="text" class="form-control form-control-sm feeder-url" placeholder="http://..." value="${urlVal}"></td>
+    <td class="text-end">
+      <div class="btn-group btn-group-sm" role="group">
+        <button class="btn btn-outline-primary feeder-run">Lancer</button>
+        <button class="btn btn-outline-danger feeder-del">Supprimer</button>
+      </div>
+    </td>
+  `;
+  tr.querySelector(".feeder-del").addEventListener("click", (e) => {
+    e.preventDefault();
+    tr.remove();
+    feederDirty = true;
+  });
+  tr.querySelector(".feeder-run").addEventListener("click", async (e) => {
+    e.preventDefault();
+    const url = tr.querySelector(".feeder-url")?.value || "";
+    const method = (
+      tr.querySelector(".feeder-method")?.value || "GET"
+    ).toString().toUpperCase();
+    if (!url) {
+      alert("URL manquante");
+      return;
+    }
+    await apiAction("trigger_feeder_url", { url, method });
+  });
+  body.appendChild(tr);
+}
+
+function collectFeederEntries() {
+  const body = document.getElementById("feederTableBody");
+  if (!body) return [];
+  const rows = Array.from(body.querySelectorAll("tr"));
+  return rows
+    .map((tr) => {
+      const time = tr.querySelector(".feeder-time")?.value || "";
+      const url = tr.querySelector(".feeder-url")?.value || "";
+      const method = (tr.querySelector(".feeder-method")?.value || "GET")
+        .toString()
+        .toUpperCase();
+      return { time, url, method };
+    })
+    .filter((e) => e.time && e.url);
+}
+
+async function saveFeederSchedule() {
+  const entries = collectFeederEntries();
+  await apiAction("set_feeder_schedule", { entries });
+  currentFeederSchedule = entries;
+  lastFeederScheduleJson = JSON.stringify(entries);
+  renderFeederSchedule();
+}
+
 const clickHandlers = {
   refreshPorts: () => refreshPorts(),
   connect: () => connect(),
@@ -609,6 +715,8 @@ const clickHandlers = {
   saveTempNames: () => saveTempNames(),
   applyRefreshInterval: () => applyRefreshInterval(),
   applyHeatHyst: () => applyHeatHyst(),
+  addFeederRow: () => addFeederRow(),
+  saveFeederSchedule: () => saveFeederSchedule(),
 };
 
 const changeHandlers = {
@@ -641,6 +749,43 @@ function initDelegates() {
     if (!handler) return;
     handler(target);
   });
+
+  const addFeederBtn = document.getElementById("addFeederRowBtn");
+  if (addFeederBtn) {
+    addFeederBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      addFeederRow();
+      feederDirty = true;
+    });
+  }
+  const saveFeederBtn = document.getElementById("saveFeederBtn");
+  if (saveFeederBtn) {
+    saveFeederBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      await saveFeederSchedule();
+      feederDirty = false;
+    });
+  }
+  const feederAutoToggle = document.getElementById("feederAutoToggle");
+  if (feederAutoToggle) {
+    feederAutoToggle.addEventListener("change", async (e) => {
+      await apiAction("set_feeder_auto", { enable: e.target.checked });
+      currentFeederAuto = e.target.checked;
+      feederDirty = true;
+    });
+  }
+
+  const feederBody = document.getElementById("feederTableBody");
+  if (feederBody) {
+    feederBody.addEventListener("input", () => {
+      feederDirty = true;
+    });
+    feederBody.addEventListener("change", () => {
+      feederDirty = true;
+    });
+  }
+
+  toastContainer = document.getElementById("toastContainer");
 }
 
 function init() {
@@ -656,3 +801,24 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+function showToast(message, type = "info", delay = 3000) {
+  if (!toastContainer) return;
+  const toastEl = document.createElement("div");
+  toastEl.className = "toast align-items-center text-bg-" + type + " border-0";
+  toastEl.setAttribute("role", "alert");
+  toastEl.setAttribute("aria-live", "assertive");
+  toastEl.setAttribute("aria-atomic", "true");
+  toastEl.innerHTML = `
+    <div class="d-flex">
+      <div class="toast-body">${message}</div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>
+  `;
+  toastContainer.appendChild(toastEl);
+  const toast = new bootstrap.Toast(toastEl, { delay, autohide: true });
+  toast.show();
+  toastEl.addEventListener("hidden.bs.toast", () => {
+    toastEl.remove();
+  });
+}

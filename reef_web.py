@@ -76,13 +76,19 @@ def api_action():
             day = params.get("day") or params.get("zone")
             controller.update_light_schedule(day, params.get("on"), params.get("off"))
         elif action == "light_toggle":
-            controller.toggle_light(params.get("state"))
+            controller.toggle_light(params.get("state"), event_type="light_manual_toggle")
         elif action == "light_auto":
             controller.set_light_auto(bool(params.get("enable", False)))
         elif action == "update_temp_names":
             controller.update_temp_names(params)
         elif action == "toggle_pump":
             controller.toggle_pump(params.get("state"))
+        elif action == "set_feeder_auto":
+            controller.set_feeder_auto(bool(params.get("enable", False)))
+        elif action == "set_feeder_schedule":
+            controller.update_feeder_schedule(params.get("entries", []))
+        elif action == "trigger_feeder_url":
+            controller.trigger_feeder_url(params["url"], params.get("method", "GET"))
         elif action == "raw":
             controller.raw(str(params.get("cmd", "")))
         elif action == "emergency_stop":
@@ -95,4 +101,5 @@ def api_action():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Désactive le reloader Flask pour éviter de lancer deux instances du contrôleur
+    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)

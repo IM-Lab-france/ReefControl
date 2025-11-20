@@ -63,9 +63,14 @@
                     role="tab">Eau</button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-feeder" type="button"
+                    role="tab">Nourriture</button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-config" type="button"
                     role="tab">Configuration</button>
             </li>
+
 
         </ul>
 
@@ -80,20 +85,20 @@
                             </div>
                             <div class="row">
                                 <div class="col-6 mb-2">
-                                    <div class="temp-main" id="tw_val">--.-°C</div>
-                                    <div class="temp-small text-secondary" id="tw_label">Eau</div>
+                                    <div class="temp-main" id="temp1_val">--.-°C</div>
+                                    <div class="temp-small text-secondary" id="temp1_label">Temp 1</div>
                                 </div>
                                 <div class="col-6 mb-2">
-                                    <div class="temp-main" id="ta_val">--.-°C</div>
-                                    <div class="temp-small text-secondary" id="ta_label">Air</div>
+                                    <div class="temp-main" id="temp2_val">--.-°C</div>
+                                    <div class="temp-small text-secondary" id="temp2_label">Temp 2</div>
                                 </div>
                                 <div class="col-12">
-                                    <div class="temp-main" id="tymin_val">--.-°C</div>
-                                    <div class="temp-small text-secondary" id="tymin_label">Y-Min</div>
+                                    <div class="temp-main" id="temp3_val">--.-°C</div>
+                                    <div class="temp-small text-secondary" id="temp3_label">Temp 3</div>
                                 </div>
                                 <div class="col-6 mb-2">
-                                    <div class="temp-main" id="tymax_val">--.-°C</div>
-                                    <div class="temp-small text-secondary" id="tymax_label">Y-Max</div>
+                                    <div class="temp-main" id="temp4_val">--.-°C</div>
+                                    <div class="temp-small text-secondary" id="temp4_label">Temp 4</div>
                                 </div>
                             </div>
                             <hr class="border-secondary-subtle" />
@@ -350,14 +355,14 @@
                     <div class="row g-3 mt-2">
                         <div class="col-md-6">
                             <div class="reef-stat">
-                                <div class="reef-stat-label" id="tymin_label2">Y-Min</div>
-                                <div class="reef-stat-value" id="tymin_val2">--.-°C</div>
+                                <div class="reef-stat-label" id="temp4_label2">Temp 4</div>
+                                <div class="reef-stat-value" id="temp4_val2">--.-°C</div>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="reef-stat">
-                                <div class="reef-stat-label" id="tymax_label2">Y-Max</div>
-                                <div class="reef-stat-value" id="tymax_val2">--.-°C</div>
+                                <div class="reef-stat-label" id="temp2_label2">Temp 2</div>
+                                <div class="reef-stat-value" id="temp2_val2">--.-°C</div>
                             </div>
                         </div>
                     </div>
@@ -411,20 +416,20 @@
                     <div class="fw-semibold mb-2">🏷️ Noms des sondes de température</div>
                     <div class="row g-2">
                         <div class="col-md-4">
-                            <label class="form-label small">Eau</label>
-                            <input id="tempName_water" class="form-control form-control-sm" />
+                            <label class="form-label small">Temp 1</label>
+                            <input id="tempName_temp1" class="form-control form-control-sm" />
                         </div>
                         <div class="col-md-4">
-                            <label class="form-label small">Air</label>
-                            <input id="tempName_air" class="form-control form-control-sm" />
+                            <label class="form-label small">Temp 2</label>
+                            <input id="tempName_temp2" class="form-control form-control-sm" />
                         </div>
                         <div class="col-md-4">
-                            <label class="form-label small">Y-Min</label>
-                            <input id="tempName_ymin" class="form-control form-control-sm" />
+                            <label class="form-label small">Temp 3</label>
+                            <input id="tempName_temp3" class="form-control form-control-sm" />
                         </div>
                         <div class="col-md-4">
-                            <label class="form-label small">Y-Max</label>
-                            <input id="tempName_ymax" class="form-control form-control-sm" />
+                            <label class="form-label small">Temp 4</label>
+                            <input id="tempName_temp4" class="form-control form-control-sm" />
                         </div>
                         <div class="col-md-4 d-flex align-items-end">
                             <button class="btn btn-aqua w-100" data-action="saveTempNames">Enregistrer</button>
@@ -438,7 +443,8 @@
                         <input id="refreshInterval" type="number" step="0.5" min="0.5" class="form-control" />
                         <button class="btn btn-aqua" data-action="applyRefreshInterval">OK</button>
                     </div>
-                    <p class="small text-secondary mb-0">Défaut 1 seconde. Change la fréquence de requêtes /api/state.</p>
+                    <p class="small text-secondary mb-0">Défaut 1 seconde. Change la fréquence de requêtes /api/state.
+                    </p>
                 </div>
                 <div class="reef-card mt-3">
                     <div class="fw-semibold mb-2">⚙️ Configuration moteurs</div>
@@ -495,12 +501,47 @@
                 </div>
             </div>
 
-
+            <div class="tab-pane fade" id="tab-feeder" role="tabpanel">
+                <div class="reef-card">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <div class="fw-semibold">Nourrissage automatique</div>
+                            <div class="text-secondary small">Planifier les heures de nourrissage et l'URL à appeler.
+                            </div>
+                        </div>
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="feederAutoToggle">
+                            <label class="form-check-label" for="feederAutoToggle">Auto</label>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th style="width:120px">Heure</th>
+                                    <th style="width:120px">Méthode</th>
+                                    <th>URL</th>
+                                    <th style="width:140px"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="feederTableBody"></tbody>
+                        </table>
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-aqua" id="addFeederRowBtn">+</button>
+                        <button class="btn btn-sm btn-primary" id="saveFeederBtn">Enregistrer</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <div class="position-fixed top-0 start-50 translate-middle-x p-3"
+        style="z-index: 1100; width: 100%; max-width: 420px;">
+        <div id="toastContainer" class="toast-container align-items-center w-100"></div>
+    </div>
     <div id="refreshLoader" class="card bg-dark bg-opacity-75 border border-secondary-subtle">
         <div class="card-body py-2 px-3">
             <div class="progress" style="height: 6px;">
