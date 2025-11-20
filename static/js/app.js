@@ -117,6 +117,32 @@ function applyRes() {
   apiAction("set_reserve", { t: value });
 }
 
+function submitWaterQuality() {
+  const fieldMap = [
+    { id: "water_no3", key: "no3" },
+    { id: "water_no2", key: "no2" },
+    { id: "water_gh", key: "gh" },
+    { id: "water_kh", key: "kh" },
+    { id: "water_cl2", key: "cl2" },
+    { id: "water_po4", key: "po4" },
+  ];
+  const params = {};
+  fieldMap.forEach(({ id, key }) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    const strValue = (input.value || "").trim();
+    if (!strValue) return;
+    const numericValue = parseFloat(strValue);
+    if (!isFinite(numericValue)) return;
+    params[key] = numericValue;
+  });
+  if (Object.keys(params).length === 0) {
+    showToast("Aucune donnée fournie pour la qualité d'eau.", "warning");
+    return;
+  }
+  apiAction("submit_water_quality", params);
+}
+
 function applyPIDWater() {}
 
 function applyPIDRes() {}
@@ -714,6 +740,7 @@ const clickHandlers = {
   pumpGo: (el) => pumpGo(el.dataset.axis),
   applyWater: () => applyWater(),
   applyRes: () => applyRes(),
+  submitWaterQuality: () => submitWaterQuality(),
   applyGlobalSpeed: () => applyGlobalSpeed(),
   editPumpName: (el) => enablePumpNameEdit(el.dataset.axis),
   pumpSave: (el) => savePumpConfig(el.dataset.axis),

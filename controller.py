@@ -1996,6 +1996,31 @@ class ReefController:
             clean_url, f"manual|{method_norm}|{clean_url}", method_norm
         )
 
+    def submit_water_quality(self, params: Dict[str, Any]) -> None:
+        if not isinstance(params, dict):
+            raise ValueError("Paramètres invalides")
+        allowed_keys = ("no3", "no2", "gh", "kh", "cl2", "po4")
+        fields: Dict[str, Any] = {}
+        for key in allowed_keys:
+            value = params.get(key)
+            if value is None:
+                continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(numeric_value) or math.isinf(numeric_value):
+                continue
+            fields[key] = numeric_value
+        if not fields:
+            raise ValueError("Aucune valeur valide fournie")
+        if self.telemetry:
+            self.telemetry.emit(
+                measurement="water_quality_manual",
+                tags={"source": "manual"},
+                fields=fields,
+            )
+
     def raw(self, cmd: str) -> None:
         self._send_command(cmd)
 

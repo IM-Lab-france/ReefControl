@@ -99,6 +99,8 @@ def api_action():
             controller.update_feeder_schedule(params.get("entries", []))
         elif action == "trigger_feeder_url":
             controller.trigger_feeder_url(params["url"], params.get("method", "GET"))
+        elif action == "submit_water_quality":
+            controller.submit_water_quality(params)
         elif action == "raw":
             controller.raw(str(params.get("cmd", "")))
         elif action == "emergency_stop":
