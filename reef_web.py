@@ -112,6 +112,41 @@ def api_action():
         return jsonify({"ok": False, "error": str(exc)}), 400
 
 
+@app.post("/api/analyze")
+def api_analyze():
+    try:
+        analysis_response = controller.get_ai_analysis()
+        return jsonify({"analysis": analysis_response})
+    except RuntimeError as exc:
+        if str(exc) == controller.OPENAI_KEY_MISSING_ERROR:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "Clé API OpenAI manquante.",
+                        "error_code": controller.OPENAI_KEY_MISSING_ERROR,
+                    }
+                ),
+                400,
+            )
+        app.logger.exception("AI analysis failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    except Exception as exc:
+        app.logger.exception("AI analysis failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/api/openai-key")
+def api_openai_key():
+    payload = request.get_json(force=True) or {}
+    api_key = (payload.get("api_key") or "").strip()
+    try:
+        controller.set_openai_api_key(api_key)
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
 if __name__ == "__main__":
     # Désactive le reloader Flask pour éviter de lancer deux instances du contrôleur
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)

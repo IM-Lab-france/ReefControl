@@ -15,6 +15,7 @@ from influxdb_client.client.write_api import WriteApi, WriteOptions
 import serial
 import serial.tools.list_ports
 import requests
+import openai
 
 try:
     import RPi.GPIO as GPIO  # type: ignore
@@ -61,6 +62,7 @@ LIGHT_DAY_KEYS = [
     "saturday",
     "sunday",
 ]
+OPENAI_KEY_FILE_PATH = BASE_DIR / ".openai_api_key"
 
 logger = logging.getLogger("reef.controller")
 logger.setLevel(logging.INFO)
@@ -317,6 +319,8 @@ class SerialClient:
 
 
 class ReefController:
+    OPENAI_KEY_MISSING_ERROR = "OPENAI_API_KEY_MISSING"
+
     def __init__(self) -> None:
         self.serial = SerialClient(self._handle_line)
         self.telemetry = telemetry_publisher
@@ -371,6 +375,7 @@ class ReefController:
             "feeder_schedule": [],
             "light_lux": None,
         }
+        self._openai_api_key: Optional[str] = None
         self.global_speed = 300
         self.steps_per_job = 1000
         self._light_sensor: Optional[LightSensorTSL2591] = None
@@ -1995,6 +2000,115 @@ class ReefController:
         self._trigger_feeder_url(
             clean_url, f"manual|{method_norm}|{clean_url}", method_norm
         )
+
+    def _load_openai_api_key(self) -> Optional[str]:
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key:
+            return env_key.strip()
+        if self._openai_api_key:
+            return self._openai_api_key
+        if OPENAI_KEY_FILE_PATH.exists():
+            try:
+                stored_key = OPENAI_KEY_FILE_PATH.read_text(encoding="utf-8").strip()
+                if stored_key:
+                    self._openai_api_key = stored_key
+                    return stored_key
+            except OSError as exc:
+                logger.error("Impossible de lire la clé API OpenAI: %s", exc)
+        return None
+
+    def _protect_openai_key_file(self) -> None:
+        if not OPENAI_KEY_FILE_PATH.exists():
+            return
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                FILE_ATTRIBUTE_HIDDEN = 0x02
+                attrs = ctypes.windll.kernel32.GetFileAttributesW(
+                    str(OPENAI_KEY_FILE_PATH)
+                )
+                if attrs != -1 and not attrs & FILE_ATTRIBUTE_HIDDEN:
+                    ctypes.windll.kernel32.SetFileAttributesW(
+                        str(OPENAI_KEY_FILE_PATH), attrs | FILE_ATTRIBUTE_HIDDEN
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Impossible de masquer le fichier de clé API OpenAI: %s", exc
+                )
+        else:
+            try:
+                os.chmod(OPENAI_KEY_FILE_PATH, 0o600)
+            except OSError as exc:
+                logger.debug(
+                    "Impossible de restreindre les permissions de la clé OpenAI: %s",
+                    exc,
+                )
+
+    def set_openai_api_key(self, api_key: str) -> None:
+        clean_key = str(api_key or "").strip()
+        if not clean_key:
+            raise ValueError("Clé API OpenAI invalide.")
+        try:
+            OPENAI_KEY_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            OPENAI_KEY_FILE_PATH.write_text(clean_key, encoding="utf-8")
+            self._protect_openai_key_file()
+        except OSError as exc:
+            logger.error("Impossible d'enregistrer la clé API OpenAI: %s", exc)
+            raise
+        self._openai_api_key = clean_key
+
+    def get_ai_analysis(self) -> str:
+        """
+        Collecte les données locales et demande une analyse à l'API d'OpenAI.
+        """
+        api_key = self._load_openai_api_key()
+        if not api_key:
+            raise RuntimeError(self.OPENAI_KEY_MISSING_ERROR)
+        client = openai.OpenAI(api_key=api_key)
+        current_data = self._build_values_payload()
+        prompt_template = """
+        Rôle: Tu es un expert en aquariophilie récifale, spécialisé dans l'analyse des paramètres de l'eau et la maintenance des écosystèmes marins.
+
+        Contexte: Voici les données de mon aquarium récifal. Analyse-les et fournis des recommandations claires et actionnables.
+
+        Données:
+        ```json
+        {data_json}
+        ```
+
+        Tâche:
+        1.  Analyse générale: Sur la base de toutes les données, y a-t-il des paramètres qui sortent des plages idéales pour un aquarium récifal ? Lesquels et pourquoi ?
+        2.  Identification des risques: Détectes-tu des problèmes potentiels ou des tendances inquiétantes (par exemple, une instabilité, une augmentation des nitrates) ?
+        3.  Santé globale: Fournis un résumé de l'état de santé général de l'aquarium (Excellent, Bon, Passable, Problématique).
+        4.  Plan d'action: Propose une liste de recommandations concrètes et priorisées. Pour chaque point, explique la raison en te basant sur les données.
+
+        Format de la réponse: Structure ta réponse avec les sections suivantes :
+        -   Résumé de l'état de santé
+        -   Points de vigilance
+        -   Recommandations
+        """
+        data_as_json_string = json.dumps(current_data, indent=2)
+        final_prompt = prompt_template.format(data_json=data_as_json_string)
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Tu es un expert en aquariophilie récifale.",
+                    },
+                    {"role": "user", "content": final_prompt},
+                ],
+                temperature=0.5,
+            )
+            response_content = completion.choices[0].message.content
+            if not response_content:
+                return "L'IA n'a pas retourné de réponse."
+            return response_content
+        except Exception as exc:
+            logger.error("Erreur lors de l'appel à l'API OpenAI: %s", exc)
+            raise RuntimeError(f"Erreur de communication avec l'API OpenAI: {exc}")
 
     def submit_water_quality(self, params: Dict[str, Any]) -> None:
         if not isinstance(params, dict):

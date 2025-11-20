@@ -143,6 +143,96 @@ function submitWaterQuality() {
   apiAction("submit_water_quality", params);
 }
 
+async function saveOpenAiKey(apiKey) {
+  const res = await fetch("/api/openai-key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!res.ok) {
+    let errorMsg = `HTTP ${res.status}`;
+    try {
+      const errData = await res.json();
+      errorMsg = errData.error || errorMsg;
+    } catch (err) {
+      console.error("OpenAI key save parse error:", err);
+    }
+    throw new Error(errorMsg);
+  }
+}
+
+async function promptAndSaveOpenAiKey() {
+  const userKey = window.prompt(
+    "Entrez votre clé API OpenAI (elle sera stockée en local pour les prochaines analyses) :"
+  );
+  if (!userKey || !userKey.trim()) {
+    showToast("Clé API OpenAI non fournie.", "warning");
+    return false;
+  }
+  try {
+    await saveOpenAiKey(userKey.trim());
+    showToast("Clé API OpenAI enregistrée.", "success");
+    return true;
+  } catch (err) {
+    showToast(`Erreur lors de l'enregistrement de la clé : ${err.message}`, "danger");
+    return false;
+  }
+}
+
+async function getAiAnalysis() {
+  const resultDiv = document.getElementById("aiAnalysisResult");
+  const spinner = document.getElementById("aiAnalysisSpinner");
+  const btn = document.querySelector('[data-action="get_ai_analysis"]');
+  if (spinner) spinner.classList.remove("d-none");
+  if (btn) btn.disabled = true;
+  if (resultDiv) {
+    resultDiv.innerHTML = "Analyse en cours, veuillez patienter...";
+  }
+  try {
+    const res = await fetch("/api/analyze", { method: "POST" });
+    if (!res.ok) {
+      let errorMsg = `HTTP ${res.status}`;
+      let errorCode;
+      try {
+        const errData = await res.json();
+        errorMsg = errData.error || errorMsg;
+        errorCode = errData.error_code || errData.code;
+      } catch (err) {
+        console.error("AI Analysis parse error:", err);
+      }
+      const error = new Error(errorMsg);
+      if (errorCode) {
+        error.code = errorCode;
+      }
+      throw error;
+    }
+    const data = await res.json();
+    const content = data.analysis || "Aucune analyse disponible.";
+    if (resultDiv) {
+      resultDiv.innerHTML = `<pre style="white-space: pre-wrap; word-wrap: break-word;">${content}</pre>`;
+    }
+  } catch (err) {
+    if (err && err.code === "OPENAI_API_KEY_MISSING") {
+      const saved = await promptAndSaveOpenAiKey();
+      if (saved) {
+        return await getAiAnalysis();
+      }
+      if (resultDiv) {
+        resultDiv.innerHTML =
+          "<div class=\"alert alert-warning\">Clé API OpenAI requise pour lancer l'analyse.</div>";
+      }
+      return;
+    }
+    console.error("AI Analysis Error:", err);
+    if (resultDiv) {
+      resultDiv.innerHTML = `<div class="alert alert-danger">Erreur lors de l'analyse : ${err.message}</div>`;
+    }
+  } finally {
+    if (spinner) spinner.classList.add("d-none");
+    if (btn) btn.disabled = false;
+  }
+}
+
 function applyPIDWater() {}
 
 function applyPIDRes() {}
@@ -754,6 +844,7 @@ const clickHandlers = {
   applyHeatHyst: () => applyHeatHyst(),
   addFeederRow: () => addFeederRow(),
   saveFeederSchedule: () => saveFeederSchedule(),
+  get_ai_analysis: () => getAiAnalysis(),
 };
 
 const changeHandlers = {
