@@ -2058,7 +2058,7 @@ class ReefController:
             raise
         self._openai_api_key = clean_key
 
-    def get_ai_analysis(self) -> str:
+    def get_ai_analysis(self) -> Dict[str, str]:
         """
         Collecte les données locales et demande une analyse à l'API d'OpenAI.
         """
@@ -2104,8 +2104,11 @@ class ReefController:
             )
             response_content = completion.choices[0].message.content
             if not response_content:
-                return "L'IA n'a pas retourné de réponse."
-            return response_content
+                response_content = "L'IA n'a pas retourné de réponse."
+            return {
+                "analysis": response_content,
+                "prompt": final_prompt.strip(),
+            }
         except Exception as exc:
             logger.error("Erreur lors de l'appel à l'API OpenAI: %s", exc)
             raise RuntimeError(f"Erreur de communication avec l'API OpenAI: {exc}")

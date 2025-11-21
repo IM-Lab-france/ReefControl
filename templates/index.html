@@ -163,17 +163,37 @@
                     </div>
                   </div>
                   <div class="reef-card mt-3">
-                      <div class="d-flex justify-content-between align-items-center mb-3">
-                          <div class="fw-semibold">Analyse par Intelligence Artificielle</div>
-                          <button class="btn btn-primary" data-action="get_ai_analysis">
-                              <span class="spinner-border spinner-border-sm d-none" role="status"
-                                  aria-hidden="true" id="aiAnalysisSpinner"></span>
-                              Lancer l'analyse
-                          </button>
+                      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                          <div class="fw-semibold mb-0">Analyse par Intelligence Artificielle</div>
+                          <div class="d-flex gap-2">
+                              <button class="btn btn-outline-light" data-action="prepareAiAnalysis" id="prepareAiBtn">
+                                  Préparer les données
+                              </button>
+                              <button class="btn btn-primary" data-action="get_ai_analysis" id="launchAiBtn" disabled>
+                                  <span class="spinner-border spinner-border-sm d-none" role="status"
+                                      aria-hidden="true" id="aiAnalysisSpinner"></span>
+                                  Interroger l'IA
+                              </button>
+                          </div>
                       </div>
-                      <div id="aiAnalysisResult" class="small text-secondary">
-                          Cliquez sur "Lancer l'analyse" pour obtenir un diagnostic et des recommandations de l'IA sur l'�tat de votre aquarium. La r�ponse appara�tra ici.
+                                            <div id="aiAnalysisResult" class="small text-secondary">
+                          Cliquez sur "Préparer les données" pour récupérer l'historique puis sur "Interroger l'IA" pour obtenir un diagnostic détaillé.
                       </div>
+                      <div class="mt-2">
+                          <label class="form-label small" for="aiContextInput">Contexte additionnel pour l'analyse (optionnel)</label>
+                          <textarea id="aiContextInput" class="form-control form-control-sm" rows="3"
+                              placeholder="Ajoutez des observations récentes, changements effectués, etc."></textarea>
+                      </div>
+                      <details id="aiSummaryDetails" class="small text-secondary mt-2 d-none">
+                          <summary>Prévisualiser les données envoyées à l'IA</summary>
+                          <pre id="aiSummaryPreview" class="mt-2 mb-0"
+                              style="white-space: pre-wrap; word-wrap: break-word; max-height: 300px; overflow:auto;"></pre>
+                      </details>
+                      <details id="aiPromptDetails" class="small text-secondary mt-2 d-none">
+                          <summary>Afficher le prompt envoyé</summary>
+                          <pre id="aiPromptContent" class="mt-2 mb-0"
+                              style="white-space: pre-wrap; word-wrap: break-word;"></pre>
+                      </details>
                   </div>
             </div>
             </div>

@@ -2,6 +2,13 @@
 
 from flask import Flask, jsonify, render_template, request
 
+from analysis import (
+    OPENAI_KEY_MISSING_ERROR as ANALYSIS_KEY_MISSING_ERROR,
+    ask_aquarium_ai,
+    build_summary,
+    load_analysis_queries,
+    save_analysis_queries,
+)
 from controller import controller, list_serial_ports
 
 
@@ -116,6 +123,8 @@ def api_action():
 def api_analyze():
     try:
         analysis_response = controller.get_ai_analysis()
+        if isinstance(analysis_response, dict):
+            return jsonify(analysis_response)
         return jsonify({"analysis": analysis_response})
     except RuntimeError as exc:
         if str(exc) == controller.OPENAI_KEY_MISSING_ERROR:
@@ -145,6 +154,81 @@ def api_openai_key():
         return jsonify({"ok": True})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+PERIOD_ALIASES = {
+    "3d": "last_3_days",
+    "week": "last_week",
+    "month": "last_month",
+    "year": "last_year",
+}
+
+
+@app.get("/analysis/queries")
+def get_analysis_queries():
+    try:
+        return jsonify(load_analysis_queries())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.put("/analysis/queries")
+def put_analysis_queries():
+    payload = request.get_json(force=True) or {}
+    try:
+        updated = save_analysis_queries(payload)
+        return jsonify(updated)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.get("/analysis/run")
+def run_analysis():
+    periods_param = request.args.get("periods", "last_3_days")
+    requested = [
+        PERIOD_ALIASES.get(item.strip(), item.strip())
+        for item in periods_param.split(",")
+        if item.strip()
+    ]
+    if not requested:
+        requested = ["last_3_days"]
+    try:
+        summary = build_summary(requested)
+        return jsonify({"summary": summary})
+    except Exception as exc:
+        app.logger.exception("Analysis build failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/analysis/ask")
+def ask_analysis():
+    payload = request.get_json(force=True) or {}
+    summary = payload.get("summary")
+    user_context = payload.get("context", "")
+    client_time = payload.get("client_time")
+    if not isinstance(summary, dict):
+        return jsonify({"ok": False, "error": "Résumé manquant pour l'analyse IA."}), 400
+    try:
+        ai_response = ask_aquarium_ai(
+            summary,
+            user_context=user_context or "",
+            client_timestamp=client_time,
+        )
+        return jsonify(ai_response)
+    except Exception as exc:
+        if isinstance(exc, RuntimeError) and str(exc) == ANALYSIS_KEY_MISSING_ERROR:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "Clé API OpenAI manquante.",
+                        "error_code": ANALYSIS_KEY_MISSING_ERROR,
+                    }
+                ),
+                400,
+            )
+        app.logger.exception("AI analysis failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 if __name__ == "__main__":

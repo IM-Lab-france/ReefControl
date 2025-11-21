@@ -26,6 +26,13 @@ let feederInitialized = false;
 let feederDirty = false;
 let lastFeederScheduleJson = "[]";
 let toastContainer = null;
+let lastAnalysisSummary = null;
+const ANALYSIS_PERIOD_LABELS = {
+  last_3_days: "0 à -3 jours",
+  last_week: "-3 à -7 jours",
+  last_month: "-7 jours à -1 mois",
+  last_year: "-1 mois à -1 an",
+};
 
 async function apiAction(action, params = {}) {
   try {
@@ -179,17 +186,111 @@ async function promptAndSaveOpenAiKey() {
   }
 }
 
+async function prepareAiAnalysis() {
+  const resultDiv = document.getElementById("aiAnalysisResult");
+  const prepareBtn = document.getElementById("prepareAiBtn");
+  const launchBtn = document.getElementById("launchAiBtn");
+  const promptDetails = document.getElementById("aiPromptDetails");
+  const summaryDetails = document.getElementById("aiSummaryDetails");
+  const summaryPreview = document.getElementById("aiSummaryPreview");
+  if (prepareBtn) prepareBtn.disabled = true;
+  if (launchBtn) launchBtn.disabled = true;
+  if (resultDiv) {
+    resultDiv.innerHTML = "Récupération des données InfluxDB en cours...";
+  }
+  if (promptDetails) promptDetails.classList.add("d-none");
+  if (summaryDetails) summaryDetails.classList.add("d-none");
+  if (summaryPreview) summaryPreview.textContent = "";
+  lastAnalysisSummary = null;
+  try {
+    const res = await fetch("/analysis/run?periods=3d,week,month,year");
+    if (!res.ok) {
+      let errorMsg = `HTTP ${res.status}`;
+      try {
+        const errData = await res.json();
+        errorMsg = errData.error || errorMsg;
+      } catch (err) {
+        console.error("Analysis data parse error:", err);
+      }
+      throw new Error(errorMsg);
+    }
+    const data = await res.json();
+    lastAnalysisSummary = data.summary;
+    const periods = (lastAnalysisSummary && lastAnalysisSummary.periods) || {};
+    const sortedPeriods = Object.entries(periods).sort((a, b) => {
+      const ta = a[1] && a[1].earliest_time ? new Date(a[1].earliest_time).getTime() : Number.NEGATIVE_INFINITY;
+      const tb = b[1] && b[1].earliest_time ? new Date(b[1].earliest_time).getTime() : Number.NEGATIVE_INFINITY;
+      return tb - ta; // dates les plus récentes en haut, les plus anciennes en bas
+    });
+    const earliestLines = sortedPeriods
+      .map(([key, value]) => {
+        if (!value || !value.earliest_time) {
+          return `${ANALYSIS_PERIOD_LABELS[key] || key}: aucune donnée`;
+        }
+        const date = new Date(value.earliest_time);
+        return `${ANALYSIS_PERIOD_LABELS[key] || key}: ${date.toLocaleString()}`;
+      })
+      .join("<br>");
+    if (resultDiv) {
+      resultDiv.innerHTML = `
+        <div>Données préparées pour ${
+          sortedPeriods.map(([key]) => ANALYSIS_PERIOD_LABELS[key] || key).join(", ") ||
+          "les périodes demandées"
+        }.</div>
+        <div class="mt-1"><strong>Ancienneté des séries (plus ancienne en bas):</strong><br>${earliestLines}</div>
+        <div class="mt-1">Vous pouvez maintenant interroger l'IA.</div>
+      `;
+    }
+    if (summaryPreview) {
+      summaryPreview.textContent = JSON.stringify(lastAnalysisSummary, null, 2);
+    }
+    if (summaryDetails) summaryDetails.classList.remove("d-none");
+    if (launchBtn) launchBtn.disabled = false;
+    showToast("Historique récupéré avec succès.", "success");
+  } catch (err) {
+    console.error("Prepare AI analysis error:", err);
+    lastAnalysisSummary = null;
+    if (resultDiv) {
+      resultDiv.innerHTML = `<div class="alert alert-danger">Impossible de récupérer les données : ${err.message}</div>`;
+    }
+    if (summaryDetails) summaryDetails.classList.add("d-none");
+    showToast(`Erreur préparation analyse : ${err.message}`, "danger");
+  } finally {
+    if (prepareBtn) prepareBtn.disabled = false;
+  }
+}
+
 async function getAiAnalysis() {
   const resultDiv = document.getElementById("aiAnalysisResult");
   const spinner = document.getElementById("aiAnalysisSpinner");
   const btn = document.querySelector('[data-action="get_ai_analysis"]');
+  const promptDetails = document.getElementById("aiPromptDetails");
+  const promptContent = document.getElementById("aiPromptContent");
+  const summaryDetails = document.getElementById("aiSummaryDetails");
+  if (!lastAnalysisSummary) {
+    showToast("Préparez d'abord les données avant d'interroger l'IA.", "warning");
+    return;
+  }
+  const contextInput = document.getElementById("aiContextInput");
+  const userContext = contextInput ? contextInput.value : "";
+  const clientTime = new Date().toISOString();
   if (spinner) spinner.classList.remove("d-none");
   if (btn) btn.disabled = true;
   if (resultDiv) {
     resultDiv.innerHTML = "Analyse en cours, veuillez patienter...";
   }
+  if (promptDetails) promptDetails.classList.add("d-none");
+  if (promptContent) promptContent.textContent = "";
   try {
-    const res = await fetch("/api/analyze", { method: "POST" });
+    const res = await fetch("/analysis/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        summary: lastAnalysisSummary,
+        context: userContext,
+        client_time: clientTime,
+      }),
+    });
     if (!res.ok) {
       let errorMsg = `HTTP ${res.status}`;
       let errorCode;
@@ -211,6 +312,12 @@ async function getAiAnalysis() {
     if (resultDiv) {
       resultDiv.innerHTML = `<pre style="white-space: pre-wrap; word-wrap: break-word;">${content}</pre>`;
     }
+    if (promptDetails && data.prompt) {
+      if (promptContent) {
+        promptContent.textContent = data.prompt;
+      }
+      promptDetails.classList.remove("d-none");
+    }
   } catch (err) {
     if (err && err.code === "OPENAI_API_KEY_MISSING") {
       const saved = await promptAndSaveOpenAiKey();
@@ -219,14 +326,17 @@ async function getAiAnalysis() {
       }
       if (resultDiv) {
         resultDiv.innerHTML =
-          "<div class=\"alert alert-warning\">Clé API OpenAI requise pour lancer l'analyse.</div>";
+          '<div class="alert alert-warning">Clé API OpenAI requise pour lancer l’analyse.</div>';
       }
+      if (promptDetails) promptDetails.classList.add("d-none");
+      if (summaryDetails) summaryDetails.classList.remove("d-none");
       return;
     }
     console.error("AI Analysis Error:", err);
     if (resultDiv) {
       resultDiv.innerHTML = `<div class="alert alert-danger">Erreur lors de l'analyse : ${err.message}</div>`;
     }
+    if (promptDetails) promptDetails.classList.add("d-none");
   } finally {
     if (spinner) spinner.classList.add("d-none");
     if (btn) btn.disabled = false;
@@ -844,6 +954,7 @@ const clickHandlers = {
   applyHeatHyst: () => applyHeatHyst(),
   addFeederRow: () => addFeederRow(),
   saveFeederSchedule: () => saveFeederSchedule(),
+  prepareAiAnalysis: () => prepareAiAnalysis(),
   get_ai_analysis: () => getAiAnalysis(),
 };
 
