@@ -596,9 +596,7 @@ function applyStateToUI(state) {
     fanBtn.disabled = !!state.auto_fan;
   }
 
-  applyLevelBadge("lvl_low", state.lvl_low, false);
-  applyLevelBadge("lvl_high", state.lvl_high, true);
-  applyLevelBadge("lvl_alert", state.lvl_alert, false);
+  updateHighLevelBadge(state.lvl_high);
 
   document.getElementById("protectChk").checked = !!state.protect;
   const protectBadge = document.getElementById("protectBadge");
@@ -656,21 +654,21 @@ function applyStateToUI(state) {
   inputsInitialized = true;
 }
 
-function applyLevelBadge(id, val, okWhenOne) {
-  const el = document.getElementById(id);
+function updateHighLevelBadge(val) {
+  const el = document.getElementById("lvl_high");
   if (!el) return;
-  const text = String(val ?? "?");
-  el.textContent = `${el.textContent.split(":")[0]}: ${text}`;
-  el.classList.remove("level-pill-ok", "level-pill-bad", "level-pill-unk");
-  if (text === "?") {
-    el.classList.add("level-pill-unk");
-  } else if (text === "1") {
-    el.classList.add(okWhenOne ? "level-pill-ok" : "level-pill-bad");
-  } else if (text === "0") {
-    el.classList.add(okWhenOne ? "level-pill-bad" : "level-pill-ok");
-  } else {
-    el.classList.add("level-pill-unk");
+  let cls = "level-pill-unk";
+  let textValue = "?";
+  if (val === "1" || val === 1 || val === true) {
+    cls = "level-pill-ok";
+    textValue = "OK";
+  } else if (val === "0" || val === 0 || val === false) {
+    cls = "level-pill-bad";
+    textValue = "BAS";
   }
+  el.textContent = `Niveau haut: ${textValue}`;
+  el.classList.remove("level-pill-ok", "level-pill-bad", "level-pill-unk");
+  el.classList.add(cls);
 }
 
 function bindPumpInfo(axis, cfg) {

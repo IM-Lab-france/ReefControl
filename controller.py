@@ -53,6 +53,7 @@ HEAT_GPIO_PIN = 24  # relais chauffe eau
 TEMP_NAMES_PATH = Path("temp_names.json")
 LIGHT_GPIO_PIN = 27
 LIGHT_QUERY_PERIOD = 6.0
+LEVEL_HIGH_GPIO_PIN = 25
 LIGHT_DAY_KEYS = [
     "monday",
     "tuesday",
@@ -390,13 +391,16 @@ class ReefController:
         self.pump_gpio_ready = False
         self.fan_gpio_ready = False
         self.heat_gpio_ready = False
+        self.level_gpio_ready = False
         self._init_light_gpio()
         self._init_pump_gpio()
         self._init_fan_gpio()
         self._init_heat_gpio()
+        self._init_level_gpio()
         self._drive_pump_gpio(self.state.get("pump_state", False))
         self._drive_fan_gpio(self.state.get("fan", 0) > 0)
         self._drive_heat_gpio(self.state.get("heat_enabled", False))
+        self._update_high_level_state()
         self._last_temp_query = 0.0
         self._last_level_query = 0.0
         self._last_status_query = 0.0
@@ -715,6 +719,52 @@ class ReefController:
             logger.error("Fan relay write failed: %s", exc)
             self.fan_gpio_ready = False
 
+    def _init_level_gpio(self) -> None:
+        if GPIO is None:
+            logger.debug("RPi.GPIO not available; level sensor disabled")
+            self.level_gpio_ready = False
+            return
+        try:
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(
+                LEVEL_HIGH_GPIO_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP
+            )
+            self.level_gpio_ready = True
+            logger.info("High level sensor configured on GPIO %s", LEVEL_HIGH_GPIO_PIN)
+        except Exception as exc:
+            self.level_gpio_ready = False
+            logger.warning(
+                "Unable to configure high level GPIO %s: %s", LEVEL_HIGH_GPIO_PIN, exc
+            )
+
+    def _read_high_level_gpio(self) -> Optional[bool]:
+        if not self.level_gpio_ready or GPIO is None:
+            return None
+        try:
+            value = GPIO.input(LEVEL_HIGH_GPIO_PIN)
+            return not bool(value)
+        except Exception as exc:
+            logger.error("High level GPIO read failed: %s", exc)
+            self.level_gpio_ready = False
+            return None
+
+    def _update_high_level_state(self) -> None:
+        level = self._read_high_level_gpio()
+        if level is None:
+            return
+        new_value = "1" if level else "0"
+        with self.state_lock:
+            prev = self.state.get("lvl_high")
+            self.state["lvl_high"] = new_value
+        if prev != new_value:
+            self._publish_device_event(
+                device_type="level",
+                device_id="high",
+                source="gpio",
+                fields={"state": level},
+            )
+
     def _publish_sensor_reading(
         self, sensor_id: str, sensor_name: str, fields: Dict[str, Any]
     ) -> None:
@@ -885,12 +935,6 @@ class ReefController:
                             self.read_temps_once()
                         except Exception as exc:
                             logger.debug("TEMP? query failed: %s", exc)
-                    if now - self._last_level_query > 5.0:
-                        self._last_level_query = now
-                        try:
-                            self.read_levels_once()
-                        except Exception as exc:
-                            logger.debug("LEVEL? query failed: %s", exc)
                     if now - self._last_status_query > 5.0:
                         self._last_status_query = now
                         try:
@@ -902,6 +946,9 @@ class ReefController:
                     if now - self._last_auto_connect_attempt > 10.0:
                         self._last_auto_connect_attempt = now
                         self._auto_connect_serial()
+                if now - self._last_level_query > 2.0:
+                    self._last_level_query = now
+                    self._update_high_level_state()
                 if now - self._last_values_push >= VALUES_POST_PERIOD:
                     self._last_values_push = now
                     self._post_values()
@@ -1648,7 +1695,7 @@ class ReefController:
         self._send_query("TEMP?")
 
     def read_levels_once(self) -> None:
-        self._send_query("LEVEL?")
+        self._update_high_level_state()
 
     def set_water(self, value: float) -> None:
         with self.state_lock:
