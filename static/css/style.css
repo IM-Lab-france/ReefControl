@@ -1,15 +1,35 @@
-﻿body {
-    background: #081b24;
+:root {
+    color-scheme: dark;
+    --reef-bg: radial-gradient(circle at 20% 20%, #0a2e3f, #030b11 60%);
+    --reef-card: rgba(9, 25, 36, 0.95);
+    --reef-glow: #32ffd7;
+    --reef-accent: #ffb347;
+    --reef-danger: #ff4d6d;
+    --reef-info: #34b5ff;
+}
+
+body {
+    background: var(--reef-bg);
     color: #f8f9fa;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    min-height: 100vh;
+    background-attachment: fixed;
+}
+
+h1,
+.nav-link,
+.fw-semibold {
+    letter-spacing: 0.02em;
 }
 
 .reef-card {
-    background: rgba(15, 32, 45, 0.96);
-    border-radius: 0.75rem;
+    background: var(--reef-card);
+    border-radius: 0.9rem;
     border: 1px solid rgba(32, 201, 151, 0.3);
     padding: 1rem 1.25rem;
-    box-shadow: 0 0.75rem 1.5rem rgba(0, 0, 0, 0.45);
+    box-shadow: 0 1rem 2rem rgba(0, 0, 0, 0.45);
+    position: relative;
+    overflow: hidden;
 }
 
 .reef-badge {
@@ -22,10 +42,25 @@
     border-radius: 999px;
     padding-inline: 1rem;
     color: #e9ecef;
+    transition: all 0.3s ease;
+    border: 1px solid transparent;
 }
 
 .nav-pills .nav-link.active {
-    background-color: #20c997;
+    background-image: linear-gradient(120deg, #20c997, #0dcaf0);
+    color: #031018;
+    font-weight: 600;
+    box-shadow: 0 0.25rem 0.8rem rgba(13, 202, 240, 0.3);
+}
+
+.glow-btn {
+    box-shadow: 0 0 0 transparent;
+    transition: transform 0.2s ease, box-shadow 0.3s ease;
+}
+
+.glow-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 0.4rem 1.2rem rgba(255, 255, 255, 0.15);
 }
 
 .temp-main {
@@ -61,6 +96,7 @@
     background: radial-gradient(circle at top left, #20c997, #0d6efd);
     border: none;
     color: #fff;
+    box-shadow: 0 0.25rem 0.75rem rgba(32, 201, 151, 0.35);
 }
 
 .btn-aqua:hover {
@@ -100,10 +136,158 @@
     border: 1px solid rgba(220, 53, 69, 0.6);
 }
 
+.lamp-visual {
+    width: 56px;
+    height: 56px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.05);
+    display: grid;
+    place-items: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.lamp-icon {
+    font-size: 1.8rem;
+    transition: transform 0.3s ease, filter 0.3s ease;
+}
+
+.lamp-on {
+    color: var(--reef-accent);
+    text-shadow: 0 0 12px rgba(255, 179, 71, 0.85);
+    animation: lamp-pulse 2s infinite;
+}
+
+.lamp-off {
+    opacity: 0.45;
+    filter: grayscale(0.4);
+}
+
+.pump-visual {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    border: 2px solid rgba(50, 255, 215, 0.4);
+    display: grid;
+    place-items: center;
+}
+
+.pump-icon {
+    font-size: 1.5rem;
+    transition: transform 0.4s ease;
+}
+
+.pump-icon.is-active {
+    animation: pump-spin 1.6s linear infinite;
+    color: var(--reef-info);
+}
+
+.peristaltic-card {
+    border-color: rgba(52, 211, 153, 0.35);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.peristaltic-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: 1px solid transparent;
+    pointer-events: none;
+    transition: border-color 0.3s ease;
+}
+
+.peristaltic-card.is-active {
+    box-shadow: 0 0.5rem 1.5rem rgba(52, 211, 153, 0.35);
+}
+
+.peristaltic-card.is-active::after {
+    border-color: rgba(52, 211, 153, 0.6);
+    animation: card-glow 1.4s ease-in-out infinite;
+}
+
+.peristaltic-chip {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px dashed rgba(255, 255, 255, 0.25);
+}
+
+.peristaltic-chip.chip-active {
+    background: rgba(50, 255, 215, 0.15);
+    border-color: rgba(50, 255, 215, 0.6);
+    color: #a4ffe5;
+}
+
 textarea.log-area {
     min-height: 180px;
     font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
     font-size: 0.75rem;
     background: #050c12;
     color: #cfd3da;
+}
+
+.reef-popin {
+    position: fixed;
+    inset: 0;
+    background: rgba(3, 10, 16, 0.8);
+    backdrop-filter: blur(4px);
+    display: grid;
+    place-items: center;
+    z-index: 2000;
+    transition: opacity 0.3s ease;
+}
+
+.reef-popin.d-none {
+    display: none !important;
+}
+
+.reef-popin-dialog {
+    background: #071823;
+    border-radius: 1rem;
+    padding: 1.5rem;
+    width: min(360px, 90vw);
+    box-shadow: 0 1.5rem 2.5rem rgba(0, 0, 0, 0.45);
+    text-align: center;
+}
+
+.reef-popin-icon {
+    font-size: 2.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.reef-popin-message {
+    font-size: 0.95rem;
+}
+
+@keyframes lamp-pulse {
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.05);
+        opacity: 0.85;
+    }
+}
+
+@keyframes pump-spin {
+    0% {
+        transform: rotate(0turn);
+    }
+    100% {
+        transform: rotate(1turn);
+    }
+}
+
+@keyframes card-glow {
+    0%,
+    100% {
+        box-shadow: 0 0 0 rgba(50, 255, 215, 0);
+    }
+    50% {
+        box-shadow: 0 0 20px rgba(50, 255, 215, 0.35);
+    }
 }

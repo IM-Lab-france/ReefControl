@@ -45,31 +45,31 @@
         <ul class="nav nav-pills mb-3" role="tablist">
             <li class="nav-item" role="presentation">
                 <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-dashboard" type="button"
-                    role="tab">Dashboard</button>
+                    role="tab">🏠 Dashboard</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-pumps" type="button"
-                    role="tab">Pompes</button>
+                    role="tab">💧 Pompes</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-heat" type="button"
-                    role="tab">Chauffes</button>
+                    role="tab">🔥 Chauffes</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-light" type="button"
-                    role="tab">Éclairage</button>
+                    role="tab">💡 Éclairage</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-water" type="button"
-                    role="tab">Eau</button>
+                    role="tab">🌊 Eau</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-feeder" type="button"
-                    role="tab">Nourriture</button>
+                    role="tab">🐠 Nourriture</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-config" type="button"
-                    role="tab">Configuration</button>
+                    role="tab">⚙️ Configuration</button>
             </li>
 
 
@@ -221,16 +221,19 @@
                     </div>
                     <div class="row g-3">
                         <div class="col-md-6">
-                            <div class="border rounded p-2 h-100">
+                            <div class="border rounded p-2 h-100 peristaltic-card" data-axis="X">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
                                         <div id="pumpLabel_X" class="fw-semibold small">Pompe X</div>
                                         <div id="pumpInfo_X" class="small text-secondary">-</div>
                                     </div>
-                                    <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="X">Go</button>
+                                    <button class="btn btn-sm btn-aqua glow-btn" data-action="pumpGo" data-axis="X">Go</button>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center gap-2 mt-2 flex-wrap">
+                                    <label class="form-label small mb-1 mb-md-0">Programmation</label>
+                                    <span class="peristaltic-chip" id="peristalticStatus_X">Repos 🌙</span>
                                 </div>
                                 <div class="mt-2">
-                                    <label class="form-label small mb-1">Programmation</label>
                                     <div class="input-group input-group-sm">
                                         <input type="time" class="form-control" id="pumpSchedule_X">
                                         <button class="btn btn-outline-light" data-action="savePumpSchedule"
@@ -242,16 +245,19 @@
                             </div>
                         </div>
                         <div class="col-md-6">
-                            <div class="border rounded p-2 h-100">
+                            <div class="border rounded p-2 h-100 peristaltic-card" data-axis="Y">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
                                         <div id="pumpLabel_Y" class="fw-semibold small">Pompe Y</div>
                                         <div id="pumpInfo_Y" class="small text-secondary">-</div>
                                     </div>
-                                    <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="Y">Go</button>
+                                    <button class="btn btn-sm btn-aqua glow-btn" data-action="pumpGo" data-axis="Y">Go</button>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center gap-2 mt-2 flex-wrap">
+                                    <label class="form-label small mb-1 mb-md-0">Programmation</label>
+                                    <span class="peristaltic-chip" id="peristalticStatus_Y">Repos 🌙</span>
                                 </div>
                                 <div class="mt-2">
-                                    <label class="form-label small mb-1">Programmation</label>
                                     <div class="input-group input-group-sm">
                                         <input type="time" class="form-control" id="pumpSchedule_Y">
                                         <button class="btn btn-outline-light" data-action="savePumpSchedule"
@@ -263,16 +269,19 @@
                             </div>
                         </div>
                         <div class="col-md-6">
-                            <div class="border rounded p-2 h-100">
+                            <div class="border rounded p-2 h-100 peristaltic-card" data-axis="Z">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
                                         <div id="pumpLabel_Z" class="fw-semibold small">Pompe Z</div>
                                         <div id="pumpInfo_Z" class="small text-secondary">-</div>
                                     </div>
-                                    <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="Z">Go</button>
+                                    <button class="btn btn-sm btn-aqua glow-btn" data-action="pumpGo" data-axis="Z">Go</button>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center gap-2 mt-2 flex-wrap">
+                                    <label class="form-label small mb-1 mb-md-0">Programmation</label>
+                                    <span class="peristaltic-chip" id="peristalticStatus_Z">Repos 🌙</span>
                                 </div>
                                 <div class="mt-2">
-                                    <label class="form-label small mb-1">Programmation</label>
                                     <div class="input-group input-group-sm">
                                         <input type="time" class="form-control" id="pumpSchedule_Z">
                                         <button class="btn btn-outline-light" data-action="savePumpSchedule"
@@ -284,16 +293,19 @@
                             </div>
                         </div>
                         <div class="col-md-6">
-                            <div class="border rounded p-2 h-100">
+                            <div class="border rounded p-2 h-100 peristaltic-card" data-axis="E">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
                                         <div id="pumpLabel_E" class="fw-semibold small">Pompe E</div>
                                         <div id="pumpInfo_E" class="small text-secondary">-</div>
                                     </div>
-                                    <button class="btn btn-sm btn-aqua" data-action="pumpGo" data-axis="E">Go</button>
+                                    <button class="btn btn-sm btn-aqua glow-btn" data-action="pumpGo" data-axis="E">Go</button>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center gap-2 mt-2 flex-wrap">
+                                    <label class="form-label small mb-1 mb-md-0">Programmation</label>
+                                    <span class="peristaltic-chip" id="peristalticStatus_E">Repos 🌙</span>
                                 </div>
                                 <div class="mt-2">
-                                    <label class="form-label small mb-1">Programmation</label>
                                     <div class="input-group input-group-sm">
                                         <input type="time" class="form-control" id="pumpSchedule_E">
                                         <button class="btn btn-outline-light" data-action="savePumpSchedule"
@@ -395,10 +407,15 @@
                 <div class="row g-3">
                     <div class="col-12">
                         <div class="reef-card">
-                            <div class="d-flex justify-content-between align-items-center">
-                                <div>
-                                    <div class="fw-semibold">Contrôle manuel</div>
-                                    <div class="small text-secondary" id="lightStateLabel">Éteinte</div>
+                            <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
+                                <div class="d-flex align-items-center gap-3">
+                                    <div class="lamp-visual" aria-hidden="true">
+                                        <span class="lamp-icon lamp-off" id="lampIcon">💡</span>
+                                    </div>
+                                    <div>
+                                        <div class="fw-semibold">Contrôle manuel</div>
+                                        <div class="small text-secondary" id="lightStateLabel">Éteinte 🌙</div>
+                                    </div>
                                 </div>
                                 <button class="btn btn-sm btn-outline-light" id="lightToggleBtn"
                                     data-action="toggleLight">Allumer</button>
@@ -414,7 +431,7 @@
                     </div>
                 </div>
                 <div class="reef-card mt-3">
-                    <div class="fw-semibold mb-3">Programmation éclairage</div>
+                    <div class="fw-semibold mb-3">🗓️ Programmation éclairage</div>
                     <div class="table-responsive">
                         <table class="table table-dark table-sm align-middle">
                             <thead>
@@ -495,12 +512,17 @@
                             </div>
                         </div>
                     </div>
-                      <div class="reef-card mt-3 d-flex justify-content-between align-items-center">
-                          <div>
-                              <div class="fw-semibold mb-1">Pompe principale</div>
-                              <div class="small text-secondary" id="pumpStateLabel">Inconnue</div>
+                      <div class="reef-card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-3">
+                          <div class="d-flex align-items-center gap-3">
+                              <div class="pump-visual" aria-hidden="true">
+                                  <span class="pump-icon" id="pumpIcon">🌀</span>
+                              </div>
+                              <div>
+                                  <div class="fw-semibold mb-1">🚰 Pompe principale</div>
+                                  <div class="small text-secondary" id="pumpStateLabel">Inconnue</div>
+                              </div>
                           </div>
-                          <button class="btn btn-sm btn-outline-light" data-action="togglePump"
+                          <button class="btn btn-sm btn-outline-light glow-btn" data-action="togglePump"
                               id="pumpToggleBtn">Basculer</button>
                       </div>
                       <div class="reef-card mt-3">
@@ -687,6 +709,13 @@
     <div class="position-fixed top-0 start-50 translate-middle-x p-3"
         style="z-index: 1100; width: 100%; max-width: 420px;">
         <div id="toastContainer" class="toast-container align-items-center w-100"></div>
+    </div>
+    <div id="reefPopin" class="reef-popin d-none" role="dialog" aria-modal="true">
+        <div class="reef-popin-dialog">
+            <div class="reef-popin-icon" id="reefPopinIcon">💬</div>
+            <div class="reef-popin-message" id="reefPopinMessage">Message</div>
+            <button class="btn btn-aqua w-100 mt-3" id="reefPopinClose">OK</button>
+        </div>
     </div>
     <div id="refreshLoader" class="card bg-dark bg-opacity-75 border border-secondary-subtle">
         <div class="card-body py-2 px-3">

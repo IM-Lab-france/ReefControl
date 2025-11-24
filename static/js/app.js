@@ -29,6 +29,7 @@ let feederDirty = false;
 let lastFeederScheduleJson = "[]";
 let toastContainer = null;
 let lastAnalysisSummary = null;
+let popinResolver = null;
 const ANALYSIS_PERIOD_LABELS = {
   last_3_days: "0 à -3 jours",
   last_week: "-3 à -7 jours",
@@ -79,7 +80,7 @@ async function refreshPorts() {
 async function connect() {
   const select = document.getElementById("portSelect");
   if (!select.value) {
-    alert("Sélectionnez un port série.");
+    showPopin("Sélectionnez un port série.", "warning");
     return;
   }
   await apiAction("connect", { port: select.value });
@@ -399,12 +400,12 @@ function onMtrAutoChanged() {
 async function pumpGo(axis) {
   const cfg = currentPumpConfig[axis];
   if (!cfg) {
-    alert("Configuration pompe manquante.");
+    showPopin("Configuration pompe manquante.", "warning");
     return;
   }
   const volume = parseFloat(cfg.volume_ml || 0);
   if (!(volume > 0)) {
-    alert("Volume invalide.");
+    showPopin("Volume invalide.", "warning");
     return;
   }
   const STEPS_PER_ML = 5000;
@@ -432,7 +433,7 @@ function applyGlobalSpeed() {
     10
   );
   if (!(value > 0)) {
-    alert("µs/step invalide");
+    showPopin("µs/step invalide", "warning");
     return;
   }
   globalSpeedUs = value;
@@ -456,7 +457,7 @@ async function savePumpConfig(axis) {
   const volume_ml = parseFloat(volumeEl?.value || "0");
   const direction = parseInt(dirEl?.value || "1", 10);
   if (!(volume_ml > 0)) {
-    alert("Volume invalide");
+    showPopin("Volume invalide", "warning");
     return;
   }
   await apiAction("update_pump_config", { axis, name, volume_ml, direction });
@@ -522,9 +523,15 @@ async function refreshState() {
 
 function applyStateToUI(state) {
   const badge = document.getElementById("statusBadge");
-  badge.textContent = state.status || "";
-  badge.classList.toggle("bg-success", !!state.connected);
-  badge.classList.toggle("bg-danger", !state.connected);
+  const statusText =
+    state.status || (state.connected ? "Connecté" : "Déconnecté");
+  if (badge) {
+    badge.textContent = state.connected
+      ? `🟢 ${statusText}`
+      : `🔴 ${statusText}`;
+    badge.classList.toggle("bg-success", !!state.connected);
+    badge.classList.toggle("bg-danger", !state.connected);
+  }
 
   const errBox = document.getElementById("megaError");
   if (state.mega_error && (state.mega_error.message || state.mega_error.code)) {
@@ -578,13 +585,20 @@ function applyStateToUI(state) {
   mirrorVal("temp4_val2", state.temp_4);
   const pumpLabel = document.getElementById("pumpStateLabel");
   const pumpBtn = document.getElementById("pumpToggleBtn");
-  if (pumpLabel)
-    pumpLabel.textContent = state.pump_state ? "Pompe OFF" : "Pompe On";
+  const pumpIcon = document.getElementById("pumpIcon");
+  if (pumpLabel) {
+    pumpLabel.textContent = state.pump_state
+      ? "Pompe au repos 💤"
+      : "Pompe en marche 💦";
+  }
   if (pumpBtn) {
     // Relais OFF (pump_state=false) -> label "Pompe On", bouton "Arrêter"
     pumpBtn.textContent = state.pump_state ? "Démarrer" : "Arrêter";
     pumpBtn.classList.toggle("btn-danger", !state.pump_state);
     pumpBtn.classList.toggle("btn-outline-light", state.pump_state);
+  }
+  if (pumpIcon) {
+    pumpIcon.classList.toggle("is-active", !state.pump_state);
   }
   if (!inputsInitialized) {
     setInputValue("tempName_temp1", tname("temp_1", "Temp 1"));
@@ -653,6 +667,19 @@ function applyStateToUI(state) {
     const value = entry.time || "";
     if (!input.matches(":focus")) {
       input.value = value || "";
+    }
+  });
+  const peristalticState = state.peristaltic_state || {};
+  ["X", "Y", "Z", "E"].forEach((axis) => {
+    const card = document.querySelector(`.peristaltic-card[data-axis="${axis}"]`);
+    const chip = document.getElementById(`peristalticStatus_${axis}`);
+    const running = !!peristalticState?.[axis];
+    if (card) {
+      card.classList.toggle("is-active", running);
+    }
+    if (chip) {
+      chip.textContent = running ? "Cycle en cours ⚙️" : "Repos 🌙";
+      chip.classList.toggle("chip-active", running);
     }
   });
   const peristalticAutoToggle = document.getElementById(
@@ -767,12 +794,17 @@ function updateLightUI(state) {
   const stateLabel = document.getElementById("lightStateLabel");
   const toggleBtn = document.getElementById("lightToggleBtn");
   if (stateLabel) {
-    stateLabel.textContent = currentLightState ? "Allumée" : "Éteinte";
+    stateLabel.textContent = currentLightState ? "Allumée ✨" : "Éteinte 🌙";
   }
   if (toggleBtn) {
     toggleBtn.textContent = currentLightState ? "Éteindre" : "Allumer";
     toggleBtn.classList.toggle("btn-danger", currentLightState);
     toggleBtn.classList.toggle("btn-outline-light", !currentLightState);
+  }
+  const lampIcon = document.getElementById("lampIcon");
+  if (lampIcon) {
+    lampIcon.classList.toggle("lamp-on", currentLightState);
+    lampIcon.classList.toggle("lamp-off", !currentLightState);
   }
   const slider = document.getElementById("lightAutoSlider");
   const label = document.getElementById("lightAutoLabel");
@@ -927,7 +959,7 @@ async function toggleFanManual(forceState) {
 async function applyHeatHyst() {
   const val = parseFloat(document.getElementById("heatHyst")?.value || "");
   if (!isFinite(val) || val < 0) {
-    alert("Hystérésis invalide");
+    showPopin("Hystérésis invalide", "warning");
     return;
   }
   await apiAction("set_heat_hyst", { value: val });
@@ -939,7 +971,7 @@ function applyRefreshInterval() {
     document.getElementById("refreshInterval")?.value || ""
   );
   if (!isFinite(val) || val < 0.5) {
-    alert("Intervalle invalide (min 0.5s)");
+    showPopin("Intervalle invalide (min 0.5s)", "warning");
     return;
   }
   refreshIntervalMs = val * 1000;
@@ -1051,7 +1083,7 @@ function addFeederRow(
       .toString()
       .toUpperCase();
     if (!url) {
-      alert("URL manquante");
+      showPopin("URL manquante", "warning");
       return;
     }
     const stopPump = !!tr.querySelector(".feeder-stop-pump")?.checked;
@@ -1260,6 +1292,7 @@ function initDelegates() {
 function init() {
   initDelegates();
   setupTabPersistence();
+  initPopin();
   refreshPorts();
   refreshState();
   nextRefreshAt = Date.now() + refreshIntervalMs;
@@ -1271,6 +1304,65 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+function initPopin() {
+  const closeBtn = document.getElementById("reefPopinClose");
+  const popin = document.getElementById("reefPopin");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", hidePopin);
+  }
+  if (popin) {
+    popin.addEventListener("click", (event) => {
+      if (event.target === popin) {
+        hidePopin();
+      }
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hidePopin();
+    }
+  });
+}
+
+function showPopin(message, type = "info") {
+  const popin = document.getElementById("reefPopin");
+  const icon = document.getElementById("reefPopinIcon");
+  const msg = document.getElementById("reefPopinMessage");
+  if (!popin || !icon || !msg) {
+    console.warn("Popin unavailable", message);
+    return Promise.resolve();
+  }
+  if (!popin.classList.contains("d-none")) {
+    hidePopin();
+  }
+  const iconMap = {
+    danger: "⛔",
+    warning: "⚠️",
+    success: "✅",
+    info: "💬",
+  };
+  icon.textContent = iconMap[type] || iconMap.info;
+  msg.textContent = message;
+  popin.classList.remove("d-none");
+  popin.classList.add("show");
+  return new Promise((resolve) => {
+    popinResolver = () => {
+      resolve();
+    };
+  });
+}
+
+function hidePopin() {
+  const popin = document.getElementById("reefPopin");
+  if (!popin) return;
+  popin.classList.add("d-none");
+  popin.classList.remove("show");
+  if (typeof popinResolver === "function") {
+    popinResolver();
+    popinResolver = null;
+  }
+}
 
 function showToast(message, type = "info", delay = 3000) {
   if (!toastContainer) return;
