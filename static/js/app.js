@@ -30,6 +30,7 @@ let lastFeederScheduleJson = "[]";
 let toastContainer = null;
 let lastAnalysisSummary = null;
 let popinResolver = null;
+let popinIsConfirm = false;
 const ANALYSIS_PERIOD_LABELS = {
   last_3_days: "0 à -3 jours",
   last_week: "-3 à -7 jours",
@@ -979,8 +980,10 @@ function applyRefreshInterval() {
 }
 
 async function restartReefService() {
-  const confirmed = window.confirm(
-    "Redémarrer le service Reef va interrompre temporairement l'IHM. Continuer ?"
+  const confirmed = await showPopin(
+    "Redémarrer le service Reef va interrompre temporairement l'IHM. Continuer ?",
+    "warning",
+    { confirmable: true, confirmText: "Redémarrer", cancelText: "Annuler" }
   );
   if (!confirmed) {
     return;
@@ -1306,35 +1309,43 @@ function init() {
 document.addEventListener("DOMContentLoaded", init);
 
 function initPopin() {
-  const closeBtn = document.getElementById("reefPopinClose");
   const popin = document.getElementById("reefPopin");
-  if (closeBtn) {
-    closeBtn.addEventListener("click", hidePopin);
+  const confirmBtn = document.getElementById("reefPopinConfirm");
+  const cancelBtn = document.getElementById("reefPopinCancel");
+  if (confirmBtn) {
+    confirmBtn.addEventListener("click", () => hidePopin(true));
+  }
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => hidePopin(popinIsConfirm ? false : true));
   }
   if (popin) {
     popin.addEventListener("click", (event) => {
       if (event.target === popin) {
-        hidePopin();
+        hidePopin(popinIsConfirm ? false : true);
       }
     });
   }
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      hidePopin();
+      hidePopin(popinIsConfirm ? false : true);
     }
   });
 }
 
-function showPopin(message, type = "info") {
+function showPopin(message, type = "info", options = {}) {
+  const { confirmable = false, confirmText = "OK", cancelText = "Annuler" } =
+    options || {};
   const popin = document.getElementById("reefPopin");
   const icon = document.getElementById("reefPopinIcon");
   const msg = document.getElementById("reefPopinMessage");
-  if (!popin || !icon || !msg) {
+  const confirmBtn = document.getElementById("reefPopinConfirm");
+  const cancelBtn = document.getElementById("reefPopinCancel");
+  if (!popin || !icon || !msg || !confirmBtn || !cancelBtn) {
     console.warn("Popin unavailable", message);
-    return Promise.resolve();
+    return Promise.resolve(confirmable ? false : true);
   }
   if (!popin.classList.contains("d-none")) {
-    hidePopin();
+    hidePopin(popinIsConfirm ? false : true);
   }
   const iconMap = {
     danger: "⛔",
@@ -1344,24 +1355,29 @@ function showPopin(message, type = "info") {
   };
   icon.textContent = iconMap[type] || iconMap.info;
   msg.textContent = message;
+  confirmBtn.textContent = confirmText;
+  cancelBtn.textContent = cancelText;
+  cancelBtn.classList.toggle("d-none", !confirmable);
+  popinIsConfirm = confirmable;
   popin.classList.remove("d-none");
   popin.classList.add("show");
   return new Promise((resolve) => {
-    popinResolver = () => {
-      resolve();
-    };
+    popinResolver = resolve;
   });
 }
 
-function hidePopin() {
+function hidePopin(result) {
   const popin = document.getElementById("reefPopin");
   if (!popin) return;
   popin.classList.add("d-none");
   popin.classList.remove("show");
   if (typeof popinResolver === "function") {
-    popinResolver();
-    popinResolver = null;
+    const finalValue =
+      typeof result === "undefined" ? (!popinIsConfirm || !popinResolver ? true : false) : result;
+    popinResolver(finalValue);
   }
+  popinResolver = null;
+  popinIsConfirm = false;
 }
 
 function showToast(message, type = "info", delay = 3000) {
