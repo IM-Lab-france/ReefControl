@@ -67,6 +67,8 @@ LIGHT_DAY_KEYS = [
 ]
 OPENAI_KEY_FILE_PATH = BASE_DIR / ".openai_api_key"
 PERISTALTIC_STEPS_PER_ML = 5000
+DEFAULT_FEEDER_STOP_PUMP = False
+DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN = 5
 
 logger = logging.getLogger("reef.controller")
 logger.setLevel(logging.INFO)
@@ -522,11 +524,26 @@ class ReefController:
                             method = str(entry.get("method", "GET")).upper()
                             if method not in ("GET", "POST"):
                                 method = "GET"
+                            stop_pump = bool(
+                                entry.get("stop_pump", DEFAULT_FEEDER_STOP_PUMP)
+                            )
+                            duration = self._sanitize_pump_stop_duration(
+                                entry.get(
+                                    "pump_stop_duration_min",
+                                    DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
+                                    if stop_pump
+                                    else 0,
+                                )
+                            )
+                            if stop_pump and duration == 0:
+                                duration = DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
                             schedule.append(
                                 {
                                     "time": entry.get("time", ""),
                                     "url": entry.get("url", ""),
                                     "method": method,
+                                    "stop_pump": stop_pump,
+                                    "pump_stop_duration_min": duration,
                                 }
                             )
                         self.state["feeder_schedule"] = schedule
@@ -536,12 +553,40 @@ class ReefController:
                 logger.error("Unable to load feeder config: %s", exc)
 
     def _save_feeder_config(self) -> None:
+        with self.state_lock:
+            auto = bool(self.state.get("feeder_auto", True))
+            existing_schedule = list(self.state.get("feeder_schedule", []))
+        schedule: list[Dict[str, Any]] = []
+        for entry in existing_schedule:
+            if not isinstance(entry, dict):
+                continue
+            method = str(entry.get("method", "GET")).upper()
+            if method not in ("GET", "POST"):
+                method = "GET"
+            stop_pump = bool(entry.get("stop_pump", DEFAULT_FEEDER_STOP_PUMP))
+            duration = self._sanitize_pump_stop_duration(
+                entry.get(
+                    "pump_stop_duration_min",
+                    DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN if stop_pump else 0,
+                )
+            )
+            if stop_pump and duration == 0:
+                duration = DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
+            schedule.append(
+                {
+                    "time": entry.get("time", ""),
+                    "url": entry.get("url", ""),
+                    "method": method,
+                    "stop_pump": stop_pump,
+                    "pump_stop_duration_min": duration,
+                }
+            )
         try:
             FEEDER_CONFIG_PATH.write_text(
                 json.dumps(
                     {
-                        "auto": self.state.get("feeder_auto", True),
-                        "schedule": self.state.get("feeder_schedule", []),
+                        "auto": auto,
+                        "schedule": schedule,
                     },
                     indent=2,
                 ),
@@ -567,6 +612,15 @@ class ReefController:
         if not (0 <= hh < 24 and 0 <= mm < 60):
             return None
         return f"{hh:02d}:{mm:02d}"
+
+    def _sanitize_pump_stop_duration(self, value: Any) -> int:
+        try:
+            duration = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if duration < 0:
+            return 0
+        return duration
 
     def _load_peristaltic_schedule(self) -> None:
         if not PERISTALTIC_SCHEDULE_PATH.exists():
@@ -1032,7 +1086,9 @@ class ReefController:
                 },
             )
 
-    def toggle_pump(self, state: Optional[bool] = None) -> None:
+    def toggle_pump(
+        self, state: Optional[bool] = None, source: str = "user"
+    ) -> None:
         with self.state_lock:
             prev_state = bool(self.state.get("pump_state", False))
             if state is None:
@@ -1044,7 +1100,7 @@ class ReefController:
         self._publish_device_event(
             device_type="pump",
             device_id="main",
-            source="user",
+            source=source,
             fields={"state": new_state, "previous_state": prev_state},
         )
 
@@ -1166,15 +1222,39 @@ class ReefController:
                         self._last_feeder_runs[key] = time.time()
                         if url:
                             url_norm = self._normalize_url(url)
+                            stop_pump = bool(
+                                entry.get("stop_pump", DEFAULT_FEEDER_STOP_PUMP)
+                            )
+                            duration = self._sanitize_pump_stop_duration(
+                                entry.get(
+                                    "pump_stop_duration_min",
+                                    DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
+                                    if stop_pump
+                                    else 0,
+                                )
+                            )
+                            if stop_pump and duration == 0:
+                                duration = DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
                             telemetry_events_logger.info(
-                                "Feeder scheduled trigger %s %s key=%s",
+                                "Feeder scheduled trigger %s %s key=%s stop_pump=%s duration=%s",
                                 method,
                                 url_norm,
                                 key,
+                                stop_pump,
+                                duration,
                             )
                             threading.Thread(
-                                target=self._trigger_feeder_url,
-                                args=(url_norm, key, method),
+                                target=self._execute_feeding_task,
+                                args=(
+                                    {
+                                        "time": f"{hh_i:02d}:{mm_i:02d}",
+                                        "url": url_norm,
+                                        "method": method,
+                                        "stop_pump": stop_pump,
+                                        "pump_stop_duration_min": duration,
+                                    },
+                                    key,
+                                ),
                                 daemon=True,
                             ).start()
                 time.sleep(10)
@@ -1230,6 +1310,104 @@ class ReefController:
             )
         except Exception as exc:
             logger.error("Scheduled peristaltic cycle %s at %s failed: %s", axis, key, exc)
+
+    def _execute_feeding_task(self, entry: Dict[str, Any], key: str) -> None:
+        url = str(entry.get("url", "") or "").strip()
+        if not url:
+            logger.warning("Feeding task %s skipped due to missing URL", key)
+            return
+        url = self._normalize_url(url)
+        method = str(entry.get("method", "GET")).upper()
+        if method not in ("GET", "POST"):
+            method = "GET"
+        stop_pump = bool(entry.get("stop_pump", DEFAULT_FEEDER_STOP_PUMP))
+        duration = self._sanitize_pump_stop_duration(
+            entry.get(
+                "pump_stop_duration_min",
+                DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN if stop_pump else 0,
+            )
+        )
+        if stop_pump and duration == 0:
+            duration = DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
+        pump_relay_state = False
+        pump_was_running = False
+        stop_executed = False
+        restart_delay_min = duration if stop_pump and duration > 0 else 0
+        if stop_pump and duration > 0:
+            with self.state_lock:
+                pump_relay_state = bool(self.state.get("pump_state", False))
+            pump_was_running = not pump_relay_state
+            if pump_was_running:
+                telemetry_events_logger.info(
+                    "Stopping pump for feeding key=%s duration=%s", key, duration
+                )
+                try:
+                    self.toggle_pump(True, source="automation")
+                    stop_executed = True
+                except Exception as exc:
+                    logger.error("Unable to stop pump before feeding %s: %s", key, exc)
+            else:
+                telemetry_events_logger.info(
+                    "Pump already off before feeding key=%s", key
+                )
+            self._publish_device_event(
+                device_type="pump",
+                device_id="main",
+                source="automation",
+                fields={
+                    "event": "feeding_pump_stop",
+                    "state": True,
+                    "key": key,
+                    "duration_min": duration,
+                    "initial_state": pump_relay_state,
+                    "pump_running_before": pump_was_running,
+                    "pump_stop_executed": stop_executed,
+                },
+            )
+        try:
+            self._trigger_feeder_url(url, key, method)
+        finally:
+            if stop_pump and duration > 0:
+
+                def _delayed_restart() -> None:
+                    try:
+                        time.sleep(restart_delay_min * 60)
+                        if stop_executed and pump_was_running:
+                            telemetry_events_logger.info(
+                                "Restarting pump automatically after feeding key=%s",
+                                key,
+                            )
+                            try:
+                                self.toggle_pump(False, source="automation")
+                                self._publish_device_event(
+                                    device_type="pump",
+                                    device_id="main",
+                                    source="automation",
+                                    fields={
+                                        "event": "feeding_pump_restart",
+                                        "state": False,
+                                        "key": key,
+                                        "duration_min": restart_delay_min,
+                                        "pump_running_after": True,
+                                    },
+                                )
+                            except Exception as exc:
+                                logger.error(
+                                    "Unable to restart pump after feeding %s: %s",
+                                    key,
+                                    exc,
+                                )
+                        else:
+                            telemetry_events_logger.info(
+                                "Skipping automatic pump restart after feeding key=%s",
+                                key,
+                            )
+                    except Exception as exc:
+                        logger.error(
+                            "Pump restart timer failed for feeding %s: %s", key, exc
+                        )
+
+                threading.Thread(target=_delayed_restart, daemon=True).start()
 
     def _trigger_feeder_url(self, url: str, key: str, method: str = "GET") -> None:
         method_norm = method.upper() if isinstance(method, str) else "GET"
@@ -2324,8 +2502,23 @@ class ReefController:
                     continue
                 if method not in ("GET", "POST"):
                     method = "GET"
+                stop_pump = bool(item.get("stop_pump", DEFAULT_FEEDER_STOP_PUMP))
+                duration = self._sanitize_pump_stop_duration(
+                    item.get(
+                        "pump_stop_duration_min",
+                        DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN if stop_pump else 0,
+                    )
+                )
+                if stop_pump and duration == 0:
+                    duration = DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
                 valid.append(
-                    {"time": f"{hh_i:02d}:{mm_i:02d}", "url": url_str, "method": method}
+                    {
+                        "time": f"{hh_i:02d}:{mm_i:02d}",
+                        "url": url_str,
+                        "method": method,
+                        "stop_pump": stop_pump,
+                        "pump_stop_duration_min": duration,
+                    }
                 )
         with self.state_lock:
             self.state["feeder_schedule"] = valid
@@ -2336,16 +2529,36 @@ class ReefController:
             value={"count": len(valid), "entries": valid},
         )
 
-    def trigger_feeder_url(self, url: str, method: str = "GET") -> None:
+    def trigger_feeder_url(
+        self,
+        url: str,
+        method: str = "GET",
+        stop_pump: Optional[bool] = None,
+        pump_stop_duration_min: Optional[int] = None,
+    ) -> None:
         if not isinstance(url, str) or not url.strip():
             raise ValueError("URL manquante")
         method_norm = method.upper() if isinstance(method, str) else "GET"
         if method_norm not in ("GET", "POST"):
             method_norm = "GET"
         clean_url = url.strip()
-        self._trigger_feeder_url(
-            clean_url, f"manual|{method_norm}|{clean_url}", method_norm
-        )
+        url_norm = self._normalize_url(clean_url)
+        stop_flag = bool(stop_pump)
+        duration = self._sanitize_pump_stop_duration(pump_stop_duration_min)
+        if stop_flag and duration == 0:
+            duration = DEFAULT_FEEDER_PUMP_STOP_DURATION
+        key = f"manual|{method_norm}|{url_norm}"
+        if stop_flag and duration > 0:
+            entry = {
+                "time": "",
+                "url": url_norm,
+                "method": method_norm,
+                "stop_pump": True,
+                "pump_stop_duration_min": duration,
+            }
+            self._execute_feeding_task(entry, key)
+        else:
+            self._trigger_feeder_url(url_norm, key, method_norm)
 
     def _load_openai_api_key(self) -> Optional[str]:
         env_key = os.environ.get("OPENAI_API_KEY")

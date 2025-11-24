@@ -7,6 +7,7 @@
   "saturday",
   "sunday",
 ];
+const DEFAULT_FEEDER_PUMP_STOP_DURATION = 5;
 
 let refreshTimer = null;
 let currentPumpConfig = {};
@@ -660,10 +661,24 @@ function applyStateToUI(state) {
   const incomingSchedule = Array.isArray(state.feeder_schedule)
     ? state.feeder_schedule.map((entry) => {
         const method = (entry?.method || "GET").toString().toUpperCase();
+        const stopPump = !!entry?.stop_pump;
+        const rawDuration = parseInt(
+          entry?.pump_stop_duration_min ??
+            (stopPump ? DEFAULT_FEEDER_PUMP_STOP_DURATION : 0),
+          10
+        );
+        const duration =
+          Number.isFinite(rawDuration) && rawDuration >= 0
+            ? rawDuration
+            : stopPump
+            ? DEFAULT_FEEDER_PUMP_STOP_DURATION
+            : 0;
         return {
           time: entry?.time || "",
           url: entry?.url || "",
           method: method === "POST" ? "POST" : "GET",
+          stop_pump: stopPump,
+          pump_stop_duration_min: duration,
         };
       })
     : [];
@@ -877,16 +892,43 @@ function renderFeederSchedule() {
     addFeederRow();
   } else {
     rows.forEach((row, idx) => {
-      addFeederRow(row.time || "", row.url || "", row.method || "GET", idx);
+      const stopPump = !!row?.stop_pump;
+      const duration =
+        typeof row?.pump_stop_duration_min === "number"
+          ? row.pump_stop_duration_min
+          : parseInt(row?.pump_stop_duration_min || "0", 10);
+      addFeederRow(
+        row.time || "",
+        row.url || "",
+        row.method || "GET",
+        stopPump,
+        Number.isFinite(duration) ? duration : stopPump ? DEFAULT_FEEDER_PUMP_STOP_DURATION : 0,
+        idx
+      );
     });
   }
 }
 
-function addFeederRow(timeVal = "", urlVal = "", methodVal = "GET", idx = null) {
+function addFeederRow(
+  timeVal = "",
+  urlVal = "",
+  methodVal = "GET",
+  stopPumpVal = false,
+  durationVal = stopPumpVal ? DEFAULT_FEEDER_PUMP_STOP_DURATION : 0,
+  idx = null
+) {
   const body = document.getElementById("feederTableBody");
   if (!body) return;
   const tr = document.createElement("tr");
   const methodClean = (methodVal || "GET").toString().toUpperCase();
+  const stopCheckedAttr = stopPumpVal ? "checked" : "";
+  const durationSafe =
+    Number.isFinite(durationVal) && durationVal >= 0
+      ? durationVal
+      : stopPumpVal
+      ? DEFAULT_FEEDER_PUMP_STOP_DURATION
+      : 0;
+  const durationDisabledAttr = stopPumpVal ? "" : "disabled";
   tr.innerHTML = `
     <td><input type="time" class="form-control form-control-sm feeder-time" value="${timeVal}"></td>
     <td>
@@ -896,6 +938,17 @@ function addFeederRow(timeVal = "", urlVal = "", methodVal = "GET", idx = null) 
       </select>
     </td>
     <td><input type="text" class="form-control form-control-sm feeder-url" placeholder="http://..." value="${urlVal}"></td>
+    <td>
+      <div class="form-check form-switch form-switch-sm mb-1">
+        <input class="form-check-input feeder-stop-pump" type="checkbox" role="switch" ${stopCheckedAttr}>
+        <label class="form-check-label small">Arrêt pompe</label>
+      </div>
+      <div class="input-group input-group-sm">
+        <span class="input-group-text">Durée</span>
+        <input type="number" min="0" step="1" class="form-control form-control-sm feeder-stop-duration" value="${durationSafe}" ${durationDisabledAttr}>
+        <span class="input-group-text">min</span>
+      </div>
+    </td>
     <td class="text-end">
       <div class="btn-group btn-group-sm" role="group">
         <button class="btn btn-outline-primary feeder-run">Lancer</button>
@@ -918,8 +971,49 @@ function addFeederRow(timeVal = "", urlVal = "", methodVal = "GET", idx = null) 
       alert("URL manquante");
       return;
     }
-    await apiAction("trigger_feeder_url", { url, method });
+    const stopPump = !!tr.querySelector(".feeder-stop-pump")?.checked;
+    let duration = parseInt(
+      tr.querySelector(".feeder-stop-duration")?.value ?? "0",
+      10
+    );
+    if (!Number.isFinite(duration) || duration < 0) {
+      duration = stopPump ? DEFAULT_FEEDER_PUMP_STOP_DURATION : 0;
+    }
+    if (!stopPump) duration = 0;
+    await apiAction("trigger_feeder_url", {
+      url,
+      method,
+      stop_pump: stopPump,
+      pump_stop_duration_min: duration,
+    });
   });
+  const stopCheckbox = tr.querySelector(".feeder-stop-pump");
+  const durationInput = tr.querySelector(".feeder-stop-duration");
+  if (stopCheckbox && durationInput) {
+    const syncDurationState = () => {
+      const enabled = stopCheckbox.checked;
+      durationInput.disabled = !enabled;
+      if (!enabled) {
+        durationInput.classList.add("bg-body-tertiary");
+      } else {
+        durationInput.classList.remove("bg-body-tertiary");
+        if (!durationInput.value || Number(durationInput.value) <= 0) {
+          durationInput.value = DEFAULT_FEEDER_PUMP_STOP_DURATION;
+        }
+      }
+    };
+    stopCheckbox.addEventListener("change", () => {
+      syncDurationState();
+      feederDirty = true;
+    });
+    durationInput.addEventListener("input", () => {
+      const parsed = parseInt(durationInput.value || "0", 10);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        durationInput.value = "";
+      }
+    });
+    syncDurationState();
+  }
   body.appendChild(tr);
 }
 
@@ -934,7 +1028,24 @@ function collectFeederEntries() {
       const method = (tr.querySelector(".feeder-method")?.value || "GET")
         .toString()
         .toUpperCase();
-      return { time, url, method };
+      const stopPump = !!tr.querySelector(".feeder-stop-pump")?.checked;
+      let duration = parseInt(
+        tr.querySelector(".feeder-stop-duration")?.value ?? "0",
+        10
+      );
+      if (!Number.isFinite(duration) || duration < 0) {
+        duration = stopPump ? DEFAULT_FEEDER_PUMP_STOP_DURATION : 0;
+      }
+      if (!stopPump) {
+        duration = 0;
+      }
+      return {
+        time,
+        url,
+        method,
+        stop_pump: stopPump,
+        pump_stop_duration_min: duration,
+      };
     })
     .filter((e) => e.time && e.url);
 }
