@@ -8,6 +8,7 @@
   "sunday",
 ];
 const DEFAULT_FEEDER_PUMP_STOP_DURATION = 5;
+const LAST_ACTIVE_TAB_KEY = "reef_active_tab";
 
 let refreshTimer = null;
 let currentPumpConfig = {};
@@ -828,6 +829,40 @@ function resetRefreshLoader() {
   loaderTimer = setInterval(updateRefreshLoader, 200);
 }
 
+function setupTabPersistence() {
+  const tabButtons = document.querySelectorAll('[data-bs-toggle="tab"]');
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("shown.bs.tab", (event) => {
+      const target =
+        event.target instanceof Element
+          ? event.target.getAttribute("data-bs-target")
+          : null;
+      if (target) {
+        try {
+          localStorage.setItem(LAST_ACTIVE_TAB_KEY, target);
+        } catch (err) {
+          console.warn("Unable to persist active tab", err);
+        }
+      }
+    });
+  });
+  let stored = null;
+  try {
+    stored = localStorage.getItem(LAST_ACTIVE_TAB_KEY);
+  } catch (err) {
+    stored = null;
+  }
+  if (stored) {
+    const trigger = document.querySelector(
+      `[data-bs-toggle="tab"][data-bs-target="${stored}"]`
+    );
+    if (trigger) {
+      const tabInstance = bootstrap.Tab.getOrCreateInstance(trigger);
+      tabInstance.show();
+    }
+  }
+}
+
 async function saveTempNames() {
   const payload = {
     temp_1: document.getElementById("tempName_temp1")?.value || "",
@@ -1173,6 +1208,7 @@ function initDelegates() {
 
 function init() {
   initDelegates();
+  setupTabPersistence();
   refreshPorts();
   refreshState();
   nextRefreshAt = Date.now() + refreshIntervalMs;
