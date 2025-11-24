@@ -397,6 +397,18 @@ async function pumpGo(axis) {
   await apiAction("pump", { axis, backwards });
 }
 
+async function savePumpSchedule(axis) {
+  const input = document.getElementById(`pumpSchedule_${axis}`);
+  const time = input ? input.value || null : null;
+  await apiAction("set_peristaltic_schedule", { axis, time });
+  refreshState();
+}
+
+async function runPumpSchedule(axis) {
+  await apiAction("peristaltic_cycle", { axis, reason: "manual_cycle" });
+  refreshState();
+}
+
 function applyGlobalSpeed() {
   const value = parseInt(
     document.getElementById("globalSpeedInput").value || "0",
@@ -609,6 +621,20 @@ function applyStateToUI(state) {
   bindPumpInfo("Y", currentPumpConfig.Y);
   bindPumpInfo("Z", currentPumpConfig.Z);
   bindPumpInfo("E", currentPumpConfig.E);
+  const peristalticSchedule = state.peristaltic_schedule || {};
+  ["X", "Y", "Z", "E"].forEach((axis) => {
+    const input = document.getElementById(`pumpSchedule_${axis}`);
+    if (!input) return;
+    const entry = peristalticSchedule[axis] || {};
+    const value = entry.time || "";
+    if (!input.matches(":focus")) {
+      input.value = value || "";
+    }
+  });
+  const peristalticAutoToggle = document.getElementById("peristalticAutoToggle");
+  if (peristalticAutoToggle) {
+    peristalticAutoToggle.checked = !!state.peristaltic_auto;
+  }
 
   const gsi = document.getElementById("globalSpeedInput");
   if (gsi) {
@@ -936,6 +962,8 @@ const clickHandlers = {
   },
   emergencyStop: () => apiAction("emergency_stop"),
   pumpGo: (el) => pumpGo(el.dataset.axis),
+  savePumpSchedule: (el) => savePumpSchedule(el.dataset.axis),
+  runPumpSchedule: (el) => runPumpSchedule(el.dataset.axis),
   applyWater: () => applyWater(),
   applyRes: () => applyRes(),
   submitWaterQuality: () => submitWaterQuality(),
@@ -1009,6 +1037,13 @@ function initDelegates() {
       await apiAction("set_feeder_auto", { enable: e.target.checked });
       currentFeederAuto = e.target.checked;
       feederDirty = true;
+    });
+  }
+
+  const peristalticAutoToggle = document.getElementById("peristalticAutoToggle");
+  if (peristalticAutoToggle) {
+    peristalticAutoToggle.addEventListener("change", async (e) => {
+      await apiAction("set_peristaltic_auto", { enable: e.target.checked });
     });
   }
 

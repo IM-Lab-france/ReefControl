@@ -89,6 +89,15 @@ def api_action():
                 volume_ml=params.get("volume_ml"),
                 direction=params.get("direction"),
             )
+        elif action == "set_peristaltic_auto":
+            controller.set_peristaltic_auto(bool(params.get("enable", False)))
+        elif action == "set_peristaltic_schedule":
+            controller.update_peristaltic_schedule(params["axis"], params.get("time"))
+        elif action == "peristaltic_cycle":
+            controller.run_peristaltic_cycle(
+                params["axis"],
+                reason=str(params.get("reason") or "manual_cycle"),
+            )
         elif action == "update_light_schedule":
             day = params.get("day") or params.get("zone")
             controller.update_light_schedule(day, params.get("on"), params.get("off"))

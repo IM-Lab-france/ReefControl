@@ -41,6 +41,8 @@ PUMP_CONFIG_PATH = BASE_DIR / "pump_config.json"
 LIGHT_SCHEDULE_PATH = BASE_DIR / "light_schedule.json"
 HEAT_CONFIG_PATH = BASE_DIR / "heat_config.json"
 FEEDER_CONFIG_PATH = BASE_DIR / "feeder_config.json"
+PERISTALTIC_SCHEDULE_PATH = BASE_DIR / "peristaltic_schedule.json"
+PERISTALTIC_LAST_RUNS_PATH = BASE_DIR / "peristaltic_last_runs.json"
 CONTROL_FILE_PATH = BASE_DIR / "control.txt"
 VALUES_POST_PERIOD = 10.0
 REQUEST_TIMEOUT = 3.0
@@ -64,6 +66,7 @@ LIGHT_DAY_KEYS = [
     "sunday",
 ]
 OPENAI_KEY_FILE_PATH = BASE_DIR / ".openai_api_key"
+PERISTALTIC_STEPS_PER_ML = 5000
 
 logger = logging.getLogger("reef.controller")
 logger.setLevel(logging.INFO)
@@ -374,6 +377,13 @@ class ReefController:
             },
             "feeder_auto": True,
             "feeder_schedule": [],
+            "peristaltic_auto": True,
+            "peristaltic_schedule": {
+                "X": {"time": None},
+                "Y": {"time": None},
+                "Z": {"time": None},
+                "E": {"time": None},
+            },
             "light_lux": None,
         }
         self._openai_api_key: Optional[str] = None
@@ -387,6 +397,13 @@ class ReefController:
         self._load_heat_config()
         self._load_temp_names()
         self._load_feeder_config()
+        self._load_peristaltic_schedule()
+        self._ensure_peristaltic_schedule_defaults()
+        self._peristaltic_runs_lock = threading.Lock()
+        self._peristaltic_last_runs: Dict[str, Optional[str]] = {
+            axis: None for axis in ("X", "Y", "Z", "E")
+        }
+        self._load_peristaltic_last_runs()
         self.light_gpio_ready = False
         self.pump_gpio_ready = False
         self.fan_gpio_ready = False
@@ -407,6 +424,7 @@ class ReefController:
         self._last_values_push = 0.0
         self._last_auto_connect_attempt = 0.0
         self._last_feeder_runs: Dict[str, float] = {}
+        self._last_peristaltic_runs: Dict[str, float] = {}
         if HAS_TSL2591:
             try:
                 self._light_sensor = LightSensorTSL2591()
@@ -426,6 +444,10 @@ class ReefController:
             target=self._feeder_scheduler_loop, daemon=True
         )
         self.feeder_scheduler.start()
+        self.peristaltic_scheduler = threading.Thread(
+            target=self._peristaltic_scheduler_loop, daemon=True
+        )
+        self.peristaltic_scheduler.start()
         self._auto_connect_serial()
 
     # ---------- Config ----------
@@ -527,6 +549,128 @@ class ReefController:
             )
         except Exception as exc:
             logger.error("Unable to save feeder config: %s", exc)
+
+    def _normalize_time_string(
+        self, value: Optional[Union[str, int, float]]
+    ) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or ":" not in text:
+            return None
+        try:
+            hh_text, mm_text = text.split(":", 1)
+            hh = int(hh_text)
+            mm = int(mm_text)
+        except Exception:
+            return None
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            return None
+        return f"{hh:02d}:{mm:02d}"
+
+    def _load_peristaltic_schedule(self) -> None:
+        if not PERISTALTIC_SCHEDULE_PATH.exists():
+            return
+        try:
+            data = json.loads(PERISTALTIC_SCHEDULE_PATH.read_text("utf-8"))
+        except Exception as exc:
+            logger.error("Unable to load peristaltic schedule: %s", exc)
+            return
+        if not isinstance(data, dict):
+            return
+        if "auto" in data:
+            self.state["peristaltic_auto"] = bool(data.get("auto", True))
+        raw_schedule = data.get("schedule", {})
+        if not isinstance(raw_schedule, dict):
+            return
+        schedule: Dict[str, Dict[str, Optional[str]]] = {}
+        for axis, entry in raw_schedule.items():
+            axis_key = str(axis).upper()
+            if isinstance(entry, dict):
+                normalized = self._normalize_time_string(entry.get("time"))
+            else:
+                normalized = self._normalize_time_string(entry)
+            schedule[axis_key] = {"time": normalized}
+        self.state["peristaltic_schedule"] = schedule
+
+    def _save_peristaltic_schedule(self) -> None:
+        with self.state_lock:
+            payload = {
+                "auto": self.state.get("peristaltic_auto", True),
+                "schedule": self.state.get("peristaltic_schedule", {}),
+            }
+        try:
+            PERISTALTIC_SCHEDULE_PATH.write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.error("Unable to save peristaltic schedule: %s", exc)
+
+    def _ensure_peristaltic_schedule_defaults(self) -> None:
+        with self.state_lock:
+            schedule = self.state.setdefault("peristaltic_schedule", {})
+            for axis in ("X", "Y", "Z", "E"):
+                entry = schedule.get(axis)
+                if not isinstance(entry, dict):
+                    schedule[axis] = {"time": None}
+                else:
+                    entry.setdefault("time", None)
+
+    def _load_peristaltic_last_runs(self) -> None:
+        if not PERISTALTIC_LAST_RUNS_PATH.exists():
+            return
+        try:
+            data = json.loads(PERISTALTIC_LAST_RUNS_PATH.read_text("utf-8"))
+        except Exception as exc:
+            logger.error("Unable to load peristaltic last runs: %s", exc)
+            return
+        if not isinstance(data, dict):
+            return
+        with self._peristaltic_runs_lock:
+            for axis in ("X", "Y", "Z", "E"):
+                value = data.get(axis)
+                normalized = self._normalize_time_string(value)
+                self._peristaltic_last_runs[axis] = normalized
+
+    def _save_peristaltic_last_runs(self) -> None:
+        with self._peristaltic_runs_lock:
+            payload = {
+                axis: self._peristaltic_last_runs.get(axis)
+                for axis in ("X", "Y", "Z", "E")
+            }
+        try:
+            PERISTALTIC_LAST_RUNS_PATH.write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.error("Unable to save peristaltic last runs: %s", exc)
+
+    def _current_minute_label(self) -> str:
+        return time.strftime("%H:%M", time.localtime())
+
+    def _ensure_peristaltic_not_recent(self, axis: str, minute_label: str) -> None:
+        normalized = self._normalize_time_string(minute_label)
+        if not normalized:
+            return
+        with self._peristaltic_runs_lock:
+            last = self._peristaltic_last_runs.get(axis.upper())
+            if last == normalized:
+                raise RuntimeError(
+                    f"Pompe {axis.upper()} déjà déclenchée à {normalized}, attendre la minute suivante."
+                )
+
+    def _record_peristaltic_run_label(self, axis: str, minute_label: str) -> None:
+        normalized = self._normalize_time_string(minute_label)
+        if not normalized:
+            return
+        axis_key = axis.upper()
+        changed = False
+        with self._peristaltic_runs_lock:
+            if self._peristaltic_last_runs.get(axis_key) != normalized:
+                self._peristaltic_last_runs[axis_key] = normalized
+                changed = True
+        if changed:
+            self._save_peristaltic_last_runs()
 
     def _load_heat_config(self) -> None:
         if HEAT_CONFIG_PATH.exists():
@@ -1037,6 +1181,55 @@ class ReefController:
             except Exception as exc:
                 logger.error("Feeder scheduler error: %s", exc)
                 time.sleep(5)
+
+    def _peristaltic_scheduler_loop(self) -> None:
+        while True:
+            try:
+                with self.state_lock:
+                    auto = bool(self.state.get("peristaltic_auto", True))
+                    schedule = dict(self.state.get("peristaltic_schedule", {}))
+                if auto:
+                    now = time.localtime()
+                    for axis, entry in schedule.items():
+                        candidate = entry.get("time") if isinstance(entry, dict) else entry
+                        normalized = self._normalize_time_string(candidate)
+                        if not normalized:
+                            continue
+                        try:
+                            hh_text, mm_text = normalized.split(":", 1)
+                            hh = int(hh_text)
+                            mm = int(mm_text)
+                        except Exception:
+                            continue
+                        if now.tm_hour != hh or now.tm_min != mm:
+                            continue
+                        key = f"{axis}|{normalized}"
+                        last_run = self._last_peristaltic_runs.get(key, 0.0)
+                        if time.time() - last_run < 70:
+                            continue
+                        self._last_peristaltic_runs[key] = time.time()
+                        threading.Thread(
+                            target=self._run_scheduled_peristaltic_cycle,
+                            args=(axis, normalized, key),
+                            daemon=True,
+                        ).start()
+                time.sleep(10)
+            except Exception as exc:
+                logger.error("Peristaltic scheduler error: %s", exc)
+                time.sleep(5)
+
+    def _run_scheduled_peristaltic_cycle(
+        self, axis: str, schedule_time: str, key: str
+    ) -> None:
+        try:
+            self.run_peristaltic_cycle(
+                axis,
+                source="automation",
+                reason="schedule",
+                extra_fields={"schedule_time": schedule_time, "schedule_key": key},
+            )
+        except Exception as exc:
+            logger.error("Scheduled peristaltic cycle %s at %s failed: %s", axis, key, exc)
 
     def _trigger_feeder_url(self, url: str, key: str, method: str = "GET") -> None:
         method_norm = method.upper() if isinstance(method, str) else "GET"
@@ -1863,40 +2056,146 @@ class ReefController:
             setting_group="pump", setting_name="global_speed", value=speed
         )
 
+    def _compute_steps_for_volume(self, volume_ml: float) -> int:
+        steps = int(round(abs(volume_ml) * PERISTALTIC_STEPS_PER_ML))
+        return max(1, steps)
+
+    def _execute_peristaltic_job(
+        self,
+        axis: str,
+        steps: int,
+        speed: int,
+        backwards: bool,
+        source: str,
+        reason: Optional[str] = None,
+        volume_override: Optional[float] = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
+        minute_label: Optional[str] = None,
+    ) -> None:
+        axis_key = axis.upper()
+        steps_abs = abs(int(steps))
+        if steps_abs <= 0:
+            raise RuntimeError("Nombre de pas invalide pour la pompe")
+        with self.state_lock:
+            auto_off = bool(self.state.get("mtr_auto_off", True))
+            protect = bool(self.state.get("protect", False))
+            low = self.state.get("lvl_low")
+        low_text = str(low).strip().lower()
+        if protect and low_text in ("1", "low", "true", "on"):
+            raise RuntimeError("Niveau bas - pompe bloquée")
+        command_speed = max(int(speed or 0), 50)
+        signed_steps = -steps_abs if backwards else steps_abs
+        self._send_command(f"PUMP {axis_key} {signed_steps} {command_speed}")
+        if auto_off:
+            threading.Thread(
+                target=self._auto_motor_off_delay,
+                args=(steps_abs, command_speed),
+                daemon=True,
+            ).start()
+        name, default_volume = self._get_peristaltic_profile(axis_key)
+        volume = default_volume
+        if volume_override is not None:
+            try:
+                volume = float(volume_override)
+            except (TypeError, ValueError):
+                pass
+        signed_volume = -abs(volume) if backwards else abs(volume)
+        fields: Dict[str, Any] = {
+            "product_name": name,
+            "volume_ml": signed_volume,
+            "steps": signed_steps,
+            "speed": command_speed,
+            "direction": -1 if backwards else 1,
+            "axis": axis_key,
+        }
+        if reason:
+            fields["reason"] = reason
+        if extra_fields and isinstance(extra_fields, dict):
+            fields.update(extra_fields)
+        self._publish_device_event(
+            device_type="peristaltic_pump",
+            device_id=name or axis_key,
+            source=source,
+            fields=fields,
+        )
+        label = minute_label or self._current_minute_label()
+        self._record_peristaltic_run_label(axis_key, label)
+
+    def run_peristaltic_cycle(
+        self,
+        axis: str,
+        source: str = "user",
+        reason: Optional[str] = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        axis_key = axis.upper()
+        with self.state_lock:
+            pump_cfg = (self.state.get("pump_config", {}).get(axis_key) or {}).copy()
+            speed = int(self.state.get("speed") or self.global_speed or 300)
+        volume_raw = pump_cfg.get("volume_ml", 0.0)
+        try:
+            volume = float(volume_raw or 0.0)
+        except (TypeError, ValueError):
+            volume = 0.0
+        if volume <= 0:
+            raise RuntimeError(f"Volume invalide pour la pompe {axis_key}")
+        direction = pump_cfg.get("direction", 1)
+        try:
+            direction_val = int(direction)
+        except (TypeError, ValueError):
+            direction_val = 1
+        backwards = direction_val < 0
+        steps = self._compute_steps_for_volume(volume)
+        minute_label = self._current_minute_label()
+        self._ensure_peristaltic_not_recent(axis_key, minute_label)
+        self._execute_peristaltic_job(
+            axis_key,
+            steps=steps,
+            speed=speed,
+            backwards=backwards,
+            source=source,
+            reason=reason,
+            volume_override=volume,
+            extra_fields=extra_fields,
+            minute_label=minute_label,
+        )
+
+    def set_peristaltic_auto(self, enable: bool) -> None:
+        with self.state_lock:
+            self.state["peristaltic_auto"] = bool(enable)
+        self._save_peristaltic_schedule()
+        self._publish_setting_change(
+            setting_group="peristaltic", setting_name="auto_mode", value=enable
+        )
+
+    def update_peristaltic_schedule(self, axis: str, time_text: Optional[str]) -> None:
+        axis_key = axis.upper()
+        normalized = self._normalize_time_string(time_text)
+        with self.state_lock:
+            schedule = self.state.setdefault("peristaltic_schedule", {})
+            entry = schedule.setdefault(axis_key, {"time": None})
+            entry["time"] = normalized
+        self._save_peristaltic_schedule()
+        self._publish_setting_change(
+            setting_group="peristaltic",
+            setting_name=f"schedule_{axis_key}",
+            value={"time": normalized},
+        )
+
     def pump(self, axis: str, backwards: bool = False) -> None:
         axis = axis.upper()
         with self.state_lock:
             steps = self.steps_per_job
             speed = self.state["speed"] or self.global_speed
-            auto_off = self.state["mtr_auto_off"]
-            protect = self.state["protect"]
-            low = self.state.get("lvl_low")
-        if protect and str(low) in ("1", "LOW", "true"):
-            raise RuntimeError("Niveau bas - pompe bloquée")
-        signed_steps = -steps if backwards else steps
-        command_speed = max(speed, 50)
-        self._send_command(f"PUMP {axis} {signed_steps} {command_speed}")
-        if auto_off:
-            threading.Thread(
-                target=self._auto_motor_off_delay,
-                args=(abs(steps), command_speed),
-                daemon=True,
-            ).start()
-        name, volume = self._get_peristaltic_profile(axis)
-        device_id = name or axis
-        signed_volume = -volume if backwards else volume
-        self._publish_device_event(
-            device_type="peristaltic_pump",
-            device_id=device_id,
+        minute_label = self._current_minute_label()
+        self._ensure_peristaltic_not_recent(axis, minute_label)
+        self._execute_peristaltic_job(
+            axis,
+            steps=steps,
+            speed=speed,
+            backwards=backwards,
             source="user",
-            fields={
-                "product_name": name,
-                "volume_ml": signed_volume,
-                "steps": signed_steps,
-                "speed": command_speed,
-                "direction": -1 if backwards else 1,
-                "axis": axis,
-            },
+            minute_label=minute_label,
         )
 
     def _auto_motor_off_delay(self, steps: int, speed: int) -> None:
