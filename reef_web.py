@@ -77,7 +77,9 @@ def api_action():
         elif action == "mtr_auto_off":
             controller.set_mtr_auto_off(bool(params.get("enable", False)))
         elif action == "set_steps_speed":
-            controller.set_steps_speed(int(params.get("steps", 0)), int(params.get("speed", 0)))
+            controller.set_steps_speed(
+                int(params.get("steps", 0)), int(params.get("speed", 0))
+            )
         elif action == "pump":
             controller.pump(params["axis"], bool(params.get("backwards", False)))
         elif action == "set_global_speed":
@@ -102,7 +104,9 @@ def api_action():
             day = params.get("day") or params.get("zone")
             controller.update_light_schedule(day, params.get("on"), params.get("off"))
         elif action == "light_toggle":
-            controller.toggle_light(params.get("state"), event_type="light_manual_toggle")
+            controller.toggle_light(
+                params.get("state"), event_type="light_manual_toggle"
+            )
         elif action == "light_auto":
             controller.set_light_auto(bool(params.get("enable", False)))
         elif action == "update_temp_names":
@@ -223,7 +227,10 @@ def ask_analysis():
     user_context = payload.get("context", "")
     client_time = payload.get("client_time")
     if not isinstance(summary, dict):
-        return jsonify({"ok": False, "error": "Résumé manquant pour l'analyse IA."}), 400
+        return (
+            jsonify({"ok": False, "error": "Résumé manquant pour l'analyse IA."}),
+            400,
+        )
     try:
         ai_response = ask_aquarium_ai(
             summary,

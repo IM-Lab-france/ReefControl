@@ -14,7 +14,7 @@ let refreshTimer = null;
 let currentPumpConfig = {};
 let currentLightState = false;
 let currentLightAuto = true;
-let globalSpeedUs = 300;
+let globalSpeedUs = 400;
 let currentHeatAuto = true;
 let currentHeatEnabled = true;
 let currentFanOn = false;
@@ -183,7 +183,10 @@ async function promptAndSaveOpenAiKey() {
     showToast("Clé API OpenAI enregistrée.", "success");
     return true;
   } catch (err) {
-    showToast(`Erreur lors de l'enregistrement de la clé : ${err.message}`, "danger");
+    showToast(
+      `Erreur lors de l'enregistrement de la clé : ${err.message}`,
+      "danger"
+    );
     return false;
   }
 }
@@ -220,8 +223,14 @@ async function prepareAiAnalysis() {
     lastAnalysisSummary = data.summary;
     const periods = (lastAnalysisSummary && lastAnalysisSummary.periods) || {};
     const sortedPeriods = Object.entries(periods).sort((a, b) => {
-      const ta = a[1] && a[1].earliest_time ? new Date(a[1].earliest_time).getTime() : Number.NEGATIVE_INFINITY;
-      const tb = b[1] && b[1].earliest_time ? new Date(b[1].earliest_time).getTime() : Number.NEGATIVE_INFINITY;
+      const ta =
+        a[1] && a[1].earliest_time
+          ? new Date(a[1].earliest_time).getTime()
+          : Number.NEGATIVE_INFINITY;
+      const tb =
+        b[1] && b[1].earliest_time
+          ? new Date(b[1].earliest_time).getTime()
+          : Number.NEGATIVE_INFINITY;
       return tb - ta; // dates les plus récentes en haut, les plus anciennes en bas
     });
     const earliestLines = sortedPeriods
@@ -230,14 +239,17 @@ async function prepareAiAnalysis() {
           return `${ANALYSIS_PERIOD_LABELS[key] || key}: aucune donnée`;
         }
         const date = new Date(value.earliest_time);
-        return `${ANALYSIS_PERIOD_LABELS[key] || key}: ${date.toLocaleString()}`;
+        return `${
+          ANALYSIS_PERIOD_LABELS[key] || key
+        }: ${date.toLocaleString()}`;
       })
       .join("<br>");
     if (resultDiv) {
       resultDiv.innerHTML = `
         <div>Données préparées pour ${
-          sortedPeriods.map(([key]) => ANALYSIS_PERIOD_LABELS[key] || key).join(", ") ||
-          "les périodes demandées"
+          sortedPeriods
+            .map(([key]) => ANALYSIS_PERIOD_LABELS[key] || key)
+            .join(", ") || "les périodes demandées"
         }.</div>
         <div class="mt-1"><strong>Ancienneté des séries (plus ancienne en bas):</strong><br>${earliestLines}</div>
         <div class="mt-1">Vous pouvez maintenant interroger l'IA.</div>
@@ -270,7 +282,10 @@ async function getAiAnalysis() {
   const promptContent = document.getElementById("aiPromptContent");
   const summaryDetails = document.getElementById("aiSummaryDetails");
   if (!lastAnalysisSummary) {
-    showToast("Préparez d'abord les données avant d'interroger l'IA.", "warning");
+    showToast(
+      "Préparez d'abord les données avant d'interroger l'IA.",
+      "warning"
+    );
     return;
   }
   const contextInput = document.getElementById("aiContextInput");
@@ -522,10 +537,18 @@ function applyStateToUI(state) {
     errBox.classList.add("d-none");
   }
 
-  document.getElementById("temp1_val").textContent = `${state.temp_1 || "--.-"}°C`;
-  document.getElementById("temp2_val").textContent = `${state.temp_2 || "--.-"}°C`;
-  document.getElementById("temp3_val").textContent = `${state.temp_3 || "--.-"}°C`;
-  document.getElementById("temp4_val").textContent = `${state.temp_4 || "--.-"}°C`;
+  document.getElementById("temp1_val").textContent = `${
+    state.temp_1 || "--.-"
+  }°C`;
+  document.getElementById("temp2_val").textContent = `${
+    state.temp_2 || "--.-"
+  }°C`;
+  document.getElementById("temp3_val").textContent = `${
+    state.temp_3 || "--.-"
+  }°C`;
+  document.getElementById("temp4_val").textContent = `${
+    state.temp_4 || "--.-"
+  }°C`;
   const phV = state.ph_v ?? state.phV ?? null;
   const phRaw = state.ph_raw ?? state.phRaw ?? null;
   document.getElementById("ph_v_val").textContent =
@@ -593,7 +616,6 @@ function applyStateToUI(state) {
     }
   }
 
-
   document.getElementById("autoFanChk").checked = !!state.auto_fan;
   document.getElementById("autoFanModeBadge").textContent = state.auto_fan
     ? "Auto"
@@ -633,7 +655,9 @@ function applyStateToUI(state) {
       input.value = value || "";
     }
   });
-  const peristalticAutoToggle = document.getElementById("peristalticAutoToggle");
+  const peristalticAutoToggle = document.getElementById(
+    "peristalticAutoToggle"
+  );
   if (peristalticAutoToggle) {
     peristalticAutoToggle.checked = !!state.peristaltic_auto;
   }
@@ -686,7 +710,10 @@ function applyStateToUI(state) {
   const incomingJson = JSON.stringify(incomingSchedule);
   currentFeederAuto = !!state.feeder_auto;
   // Ne réécrit les inputs que si jamais initialisé ou si pas en édition locale
-  if (!feederInitialized || (!feederDirty && incomingJson !== lastFeederScheduleJson)) {
+  if (
+    !feederInitialized ||
+    (!feederDirty && incomingJson !== lastFeederScheduleJson)
+  ) {
     currentFeederSchedule = incomingSchedule;
     lastFeederScheduleJson = incomingJson;
     renderFeederSchedule();
@@ -816,7 +843,10 @@ function updateRefreshLoader() {
   if (!bar || !nextRefreshAt || !refreshIntervalMs) return;
   const now = Date.now();
   const remaining = Math.max(0, nextRefreshAt - now);
-  const pct = Math.min(100, Math.max(0, 100 - (remaining / refreshIntervalMs) * 100));
+  const pct = Math.min(
+    100,
+    Math.max(0, 100 - (remaining / refreshIntervalMs) * 100)
+  );
   bar.style.width = `${pct.toFixed(1)}%`;
 }
 
@@ -947,7 +977,11 @@ function renderFeederSchedule() {
         row.url || "",
         row.method || "GET",
         stopPump,
-        Number.isFinite(duration) ? duration : stopPump ? DEFAULT_FEEDER_PUMP_STOP_DURATION : 0,
+        Number.isFinite(duration)
+          ? duration
+          : stopPump
+          ? DEFAULT_FEEDER_PUMP_STOP_DURATION
+          : 0,
         idx
       );
     });
@@ -978,8 +1012,12 @@ function addFeederRow(
     <td><input type="time" class="form-control form-control-sm feeder-time" value="${timeVal}"></td>
     <td>
       <select class="form-select form-select-sm feeder-method">
-        <option value="GET"${methodClean === "GET" ? " selected" : ""}>GET</option>
-        <option value="POST"${methodClean === "POST" ? " selected" : ""}>POST</option>
+        <option value="GET"${
+          methodClean === "GET" ? " selected" : ""
+        }>GET</option>
+        <option value="POST"${
+          methodClean === "POST" ? " selected" : ""
+        }>POST</option>
       </select>
     </td>
     <td><input type="text" class="form-control form-control-sm feeder-url" placeholder="http://..." value="${urlVal}"></td>
@@ -1009,9 +1047,9 @@ function addFeederRow(
   tr.querySelector(".feeder-run").addEventListener("click", async (e) => {
     e.preventDefault();
     const url = tr.querySelector(".feeder-url")?.value || "";
-    const method = (
-      tr.querySelector(".feeder-method")?.value || "GET"
-    ).toString().toUpperCase();
+    const method = (tr.querySelector(".feeder-method")?.value || "GET")
+      .toString()
+      .toUpperCase();
     if (!url) {
       alert("URL manquante");
       return;
@@ -1197,7 +1235,9 @@ function initDelegates() {
     });
   }
 
-  const peristalticAutoToggle = document.getElementById("peristalticAutoToggle");
+  const peristalticAutoToggle = document.getElementById(
+    "peristalticAutoToggle"
+  );
   if (peristalticAutoToggle) {
     peristalticAutoToggle.addEventListener("change", async (e) => {
       await apiAction("set_peristaltic_auto", { enable: e.target.checked });

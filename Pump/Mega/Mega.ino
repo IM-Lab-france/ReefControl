@@ -15,7 +15,7 @@
 
 static const char *FW_VERSION = "2.0.0";
 static const uint32_t BAUDRATE = 115200;
-static const unsigned long MIN_STEP_DELAY_US = 300;
+static const unsigned long MIN_STEP_DELAY_US = 400;
 static const unsigned long STEP_PULSE_US = 4;
 static const float R_SERIE = 4700.0f;
 static const float BETA = 3950.0f;
@@ -62,19 +62,19 @@ static PIDCtrl pid_reserve;
 #define HEAT_RES_PIN 10
 #define SERVO_PIN 11
 
-#define WATER_DS_PIN 3  // X_MIN endstop (digital) pour DS18B20 eau
-#define AIR_DS_PIN 2    // X_MAX endstop (digital) pour DS18B20 air
-#define YMIN_DS_PIN 14  // Y_MIN endstop (digital) pour DS18B20 #3
-#define YMAX_DS_PIN 15  // Y_MAX endstop (digital) pour DS18B20 #4
+#define WATER_DS_PIN 3 // X_MIN endstop (digital) pour DS18B20 eau
+#define AIR_DS_PIN 2   // X_MAX endstop (digital) pour DS18B20 air
+#define YMIN_DS_PIN 14 // Y_MIN endstop (digital) pour DS18B20 #3
+#define YMAX_DS_PIN 15 // Y_MAX endstop (digital) pour DS18B20 #4
 // pH sur T0/A13. Thermistances : auxiliaire sur A12 (AUX-2). Eau/Air/sondes Y en DS18B20.
 #define TH_WATER A15
 #define TH_AIR A14
 #define TH_AUX A12
-#define PH_PIN A13  // T0
+#define PH_PIN A13 // T0
 
-#define LVL_LOW_PIN 18   // Z_MIN
-#define LVL_HIGH_PIN 19  // Z_MAX
-#define LVL_ALERT_PIN 4  // libre (AUX-2) pour alerte niveau
+#define LVL_LOW_PIN 18  // Z_MIN
+#define LVL_HIGH_PIN 19 // Z_MAX
+#define LVL_ALERT_PIN 4 // libre (AUX-2) pour alerte niveau
 
 static OneWire oneWireWater(WATER_DS_PIN);
 static DallasTemperature ds18Water(&oneWireWater);

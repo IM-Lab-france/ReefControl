@@ -352,7 +352,7 @@ class ReefController:
             "lvl_alert": "?",
             "protect": True,
             "steps": 3200,
-            "speed": 300,
+            "speed": 400,
             "mtr_auto_off": True,
             "servo_angle": 10,
             "motors_powered": False,
@@ -390,7 +390,7 @@ class ReefController:
             "light_lux": None,
         }
         self._openai_api_key: Optional[str] = None
-        self.global_speed = 300
+        self.global_speed = 400
         self.steps_per_job = 1000
         self._light_sensor: Optional[LightSensorTSL2591] = None
         self._last_light_query = 0.0
@@ -2322,7 +2322,7 @@ class ReefController:
         axis_key = axis.upper()
         with self.state_lock:
             pump_cfg = (self.state.get("pump_config", {}).get(axis_key) or {}).copy()
-            speed = int(self.state.get("speed") or self.global_speed or 300)
+            speed = int(self.state.get("speed") or self.global_speed or 400)
         volume_raw = pump_cfg.get("volume_ml", 0.0)
         try:
             volume = float(volume_raw or 0.0)
@@ -2585,7 +2585,7 @@ class ReefController:
         stop_flag = bool(stop_pump)
         duration = self._sanitize_pump_stop_duration(pump_stop_duration_min)
         if stop_flag and duration == 0:
-            duration = DEFAULT_FEEDER_PUMP_STOP_DURATION
+            duration = DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
         key = f"manual|{method_norm}|{url_norm}"
         if stop_flag and duration > 0:
             entry = {
