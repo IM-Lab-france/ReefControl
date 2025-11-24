@@ -916,6 +916,16 @@ function applyRefreshInterval() {
   restartRefreshTimer();
 }
 
+async function restartReefService() {
+  const confirmed = window.confirm(
+    "Redémarrer le service Reef va interrompre temporairement l'IHM. Continuer ?"
+  );
+  if (!confirmed) {
+    return;
+  }
+  await apiAction("restart_service");
+}
+
 function renderFeederSchedule() {
   const body = document.getElementById("feederTableBody");
   if (!body) return;
@@ -1123,6 +1133,7 @@ const clickHandlers = {
   togglePump: () => togglePump(),
   saveTempNames: () => saveTempNames(),
   applyRefreshInterval: () => applyRefreshInterval(),
+  restartService: () => restartReefService(),
   applyHeatHyst: () => applyHeatHyst(),
   addFeederRow: () => addFeederRow(),
   saveFeederSchedule: () => saveFeederSchedule(),

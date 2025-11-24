@@ -4,6 +4,7 @@ import logging
 import logging.handlers
 import os
 import queue
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -530,9 +531,11 @@ class ReefController:
                             duration = self._sanitize_pump_stop_duration(
                                 entry.get(
                                     "pump_stop_duration_min",
-                                    DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
-                                    if stop_pump
-                                    else 0,
+                                    (
+                                        DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
+                                        if stop_pump
+                                        else 0
+                                    ),
                                 )
                             )
                             if stop_pump and duration == 0:
@@ -925,9 +928,7 @@ class ReefController:
         try:
             GPIO.setwarnings(False)
             GPIO.setmode(GPIO.BCM)
-            GPIO.setup(
-                LEVEL_HIGH_GPIO_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP
-            )
+            GPIO.setup(LEVEL_HIGH_GPIO_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             self.level_gpio_ready = True
             logger.info("High level sensor configured on GPIO %s", LEVEL_HIGH_GPIO_PIN)
         except Exception as exc:
@@ -936,12 +937,20 @@ class ReefController:
                 "Unable to configure high level GPIO %s: %s", LEVEL_HIGH_GPIO_PIN, exc
             )
 
-    def _read_high_level_gpio(self) -> Optional[bool]:
+    def _read_high_level_gpio(
+        self, samples: int = 5, delay_s: float = 0.02
+    ) -> Optional[bool]:
         if not self.level_gpio_ready or GPIO is None:
             return None
         try:
-            value = GPIO.input(LEVEL_HIGH_GPIO_PIN)
-            return not bool(value)
+            first_read = GPIO.input(LEVEL_HIGH_GPIO_PIN)
+            for _ in range(samples - 1):
+                time.sleep(delay_s)
+                value = GPIO.input(LEVEL_HIGH_GPIO_PIN)
+                if value != first_read:
+                    logger.debug("High level sensor value is unstable (debouncing).")
+                    return None
+            return not bool(first_read)
         except Exception as exc:
             logger.error("High level GPIO read failed: %s", exc)
             self.level_gpio_ready = False
@@ -1086,9 +1095,7 @@ class ReefController:
                 },
             )
 
-    def toggle_pump(
-        self, state: Optional[bool] = None, source: str = "user"
-    ) -> None:
+    def toggle_pump(self, state: Optional[bool] = None, source: str = "user") -> None:
         with self.state_lock:
             prev_state = bool(self.state.get("pump_state", False))
             if state is None:
@@ -1228,9 +1235,11 @@ class ReefController:
                             duration = self._sanitize_pump_stop_duration(
                                 entry.get(
                                     "pump_stop_duration_min",
-                                    DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
-                                    if stop_pump
-                                    else 0,
+                                    (
+                                        DEFAULT_FEEDER_PUMP_STOP_DURATION_MIN
+                                        if stop_pump
+                                        else 0
+                                    ),
                                 )
                             )
                             if stop_pump and duration == 0:
@@ -1271,7 +1280,9 @@ class ReefController:
                 if auto:
                     now = time.localtime()
                     for axis, entry in schedule.items():
-                        candidate = entry.get("time") if isinstance(entry, dict) else entry
+                        candidate = (
+                            entry.get("time") if isinstance(entry, dict) else entry
+                        )
                         normalized = self._normalize_time_string(candidate)
                         if not normalized:
                             continue
@@ -1309,7 +1320,9 @@ class ReefController:
                 extra_fields={"schedule_time": schedule_time, "schedule_key": key},
             )
         except Exception as exc:
-            logger.error("Scheduled peristaltic cycle %s at %s failed: %s", axis, key, exc)
+            logger.error(
+                "Scheduled peristaltic cycle %s at %s failed: %s", axis, key, exc
+            )
 
     def _execute_feeding_task(self, entry: Dict[str, Any], key: str) -> None:
         url = str(entry.get("url", "") or "").strip()
@@ -2392,6 +2405,32 @@ class ReefController:
             source="user",
             fields={"action": "emergency_stop"},
         )
+
+    def restart_service(self) -> None:
+        command = ["sudo", "systemctl", "restart", "reef"]
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            logger.info("Reef service restart requested from UI.")
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or exc.stdout or "").strip()
+            logger.error(
+                "Reef service restart failed (code=%s): %s",
+                exc.returncode,
+                stderr,
+            )
+            raise RuntimeError("Impossible de redémarrer le service reef.") from exc
+        except FileNotFoundError as exc:
+            logger.error("systemctl introuvable pour redémarrer reef: %s", exc)
+            raise RuntimeError("Commande systemctl introuvable sur cet hôte.") from exc
+        except Exception as exc:
+            logger.error("Unexpected error restarting reef service: %s", exc)
+            raise RuntimeError("Erreur lors du redémarrage du service reef.") from exc
 
     def update_pump_config(
         self,

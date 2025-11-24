@@ -126,6 +126,8 @@ def api_action():
             controller.raw(str(params.get("cmd", "")))
         elif action == "emergency_stop":
             controller.emergency_stop()
+        elif action == "restart_service":
+            controller.restart_service()
         else:
             return jsonify({"ok": False, "error": f"Action inconnue: {action}"}), 400
         return jsonify({"ok": True})

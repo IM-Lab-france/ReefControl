@@ -635,6 +635,14 @@
                         {% endfor %}
                     </div>
                 </div>
+                <div class="reef-card mt-3">
+                    <div class="fw-semibold mb-2">🔁 Maintenance du service</div>
+                    <p class="small text-secondary mb-3">
+                        Redémarre le service systemd <code>reef</code> sur le Raspberry Pi. L'IHM sera indisponible
+                        quelques secondes pendant l'opération.
+                    </p>
+                    <button class="btn btn-danger" data-action="restartService">Redémarrer le service Reef</button>
+                </div>
             </div>
 
             <div class="tab-pane fade" id="tab-feeder" role="tabpanel">
