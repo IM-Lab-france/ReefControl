@@ -403,8 +403,8 @@ class ReefController:
         self._load_peristaltic_schedule()
         self._ensure_peristaltic_schedule_defaults()
         self._peristaltic_runs_lock = threading.Lock()
-        self._peristaltic_last_runs: Dict[str, Optional[str]] = {
-            axis: None for axis in ("X", "Y", "Z", "E")
+        self._peristaltic_last_runs: Dict[str, list[dict[str, str]]] = {
+            axis: [] for axis in ("X", "Y", "Z", "E")
         }
         self._load_peristaltic_last_runs()
         self.light_gpio_ready = False
@@ -709,11 +709,12 @@ class ReefController:
         normalized = self._normalize_time_string(minute_label)
         if not normalized:
             return
+        axis_key = axis.upper()
         with self._peristaltic_runs_lock:
-            last = self._peristaltic_last_runs.get(axis.upper())
-            if last == normalized:
+            history = self._peristaltic_last_runs.get(axis_key) or []
+            if history and history[-1].get("label") == normalized:
                 raise RuntimeError(
-                    f"Pompe {axis.upper()} déjà déclenchée à {normalized}, attendre la minute suivante."
+                    f"Pompe {axis_key} déjà déclenchée à {normalized}, attendre la minute suivante."
                 )
 
     def _record_peristaltic_run_label(self, axis: str, minute_label: str) -> None:
@@ -723,8 +724,13 @@ class ReefController:
         axis_key = axis.upper()
         changed = False
         with self._peristaltic_runs_lock:
-            if self._peristaltic_last_runs.get(axis_key) != normalized:
-                self._peristaltic_last_runs[axis_key] = normalized
+            history = self._peristaltic_last_runs.setdefault(axis_key, [])
+            if not history or history[-1].get("label") != normalized:
+                history.append(
+                    {"timestamp": datetime.utcnow().isoformat(), "label": normalized}
+                )
+                if len(history) > 7:
+                    del history[:-7]
                 changed = True
         if changed:
             self._save_peristaltic_last_runs()
