@@ -1,0 +1,943 @@
+import io
+import json
+import logging
+import os
+import subprocess
+import tempfile
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+try:
+    from picamera2 import Picamera2
+    from picamera2.encoders import H264Encoder
+    from picamera2.outputs import FfmpegOutput
+
+    try:
+        from libcamera import Transform  # type: ignore
+    except Exception:  # pragma: no cover - libcamera not available outside Pi
+        Transform = None  # type: ignore
+    HAS_PICAMERA2 = True
+except Exception:  # pragma: no cover - picamera2 not available locally
+    Picamera2 = None  # type: ignore
+    H264Encoder = None  # type: ignore
+    FfmpegOutput = None  # type: ignore
+    Transform = None  # type: ignore
+    HAS_PICAMERA2 = False
+
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    HAS_CV2 = True
+except Exception:  # pragma: no cover - OpenCV optional
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+    HAS_CV2 = False
+
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+except Exception:  # pragma: no cover - scheduler optional
+    BackgroundScheduler = None  # type: ignore
+
+
+logger = logging.getLogger("reef.camera")
+logger.setLevel(logging.INFO)
+
+BASE_DIR = Path(__file__).resolve().parent
+CAMERA_CONFIG_PATH = BASE_DIR / "camera_config.json"
+DEFAULT_SAVE_DIR = BASE_DIR / "camera_media"
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".h264"}
+
+
+def detect_usb_camera_device(max_index: int = 4) -> Optional[str]:
+    for idx in range(max_index):
+        candidate = Path(f"/dev/video{idx}")
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+class CameraUnavailable(RuntimeError):
+    pass
+
+
+class CameraManager:
+    def __init__(self, config_path: Path) -> None:
+        self.config_path = config_path
+        self._config = {
+            "hflip": False,
+            "vflip": False,
+            "capture_frequency_hours": 6.0,
+            "save_directory": str(DEFAULT_SAVE_DIR),
+            "camera_id": None,
+            "brightness": 0.0,
+            "contrast": 1.0,
+            "saturation": 1.0,
+        }
+        self._picam2: Optional["Picamera2"] = None
+        self._preview_config = None
+        self._still_config = None
+        self._video_config = None
+        self._current_mode: Optional[str] = None
+        self._camera_started = False
+        self._config_dirty = False
+        self._camera_lock = threading.RLock()
+        self._stream_pause = threading.Event()
+        self._stream_pause.set()
+        self._scheduler: Optional["BackgroundScheduler"] = None
+        self._auto_job_id = "reef_camera_auto_capture"
+        self._camera_infos: List[Dict[str, object]] = []
+        self._camera_id: Optional[str] = None
+        self._usb_device: Optional[str] = detect_usb_camera_device()
+        self._load_config()
+        self.save_directory = self._normalize_directory(
+            self._config.get("save_directory") or str(DEFAULT_SAVE_DIR)
+        )
+        self.save_directory.mkdir(parents=True, exist_ok=True)
+        self._init_camera()
+        self._init_scheduler()
+
+    # ---------- Public API ----------
+    @property
+    def available(self) -> bool:
+        if HAS_PICAMERA2 and self._picam2 is not None:
+            return True
+        usb_device = self._get_usb_device()
+        if usb_device and self._find_executable("fswebcam"):
+            return True
+        return False
+
+    def get_settings(self) -> Dict[str, object]:
+        payload = dict(self._config)
+        payload.update(
+            {
+                "save_directory": str(self.save_directory),
+                "camera_available": self.available,
+                "auto_capture_enabled": self._auto_capture_enabled(),
+                "active_camera_id": self._camera_id,
+                "cameras": self.list_cameras(),
+            }
+        )
+        return payload
+
+    def update_settings(self, payload: Dict[str, object]) -> Dict[str, object]:
+        if not isinstance(payload, dict):
+            raise ValueError("Paramètres invalides.")
+        updated = dict(self._config)
+        if "hflip" in payload:
+            updated["hflip"] = bool(payload.get("hflip"))
+        if "vflip" in payload:
+            updated["vflip"] = bool(payload.get("vflip"))
+        if "capture_frequency_hours" in payload:
+            try:
+                freq = float(payload.get("capture_frequency_hours", 0))
+            except (TypeError, ValueError):
+                raise ValueError("Fréquence invalide.")
+            if freq < 0:
+                raise ValueError("La fréquence doit être positive.")
+            updated["capture_frequency_hours"] = freq
+        if "save_directory" in payload:
+            directory = str(payload.get("save_directory") or "").strip()
+            if not directory:
+                raise ValueError("Le répertoire de sauvegarde est requis.")
+            new_dir = self._normalize_directory(directory)
+            new_dir.mkdir(parents=True, exist_ok=True)
+            self.save_directory = new_dir
+            updated["save_directory"] = str(new_dir)
+        for key in ("brightness", "contrast", "saturation"):
+            if key in payload:
+                try:
+                    value = float(payload.get(key))
+                except (TypeError, ValueError):
+                    raise ValueError(f"Valeur invalide pour {key}.")
+                if key == "brightness":
+                    value = max(-1.0, min(1.0, value))
+                else:
+                    value = max(0.1, min(4.0, value))
+                updated[key] = value
+        transform_changed = (
+            updated["hflip"] != self._config.get("hflip")
+            or updated["vflip"] != self._config.get("vflip")
+        )
+        self._config = updated
+        if transform_changed:
+            self._config_dirty = True
+        self._save_config()
+        if self._picam2 is not None and transform_changed:
+            self._reconfigure_camera()
+        self._reschedule_auto_capture()
+        return self.get_settings()
+
+    def list_cameras(self) -> List[Dict[str, object]]:
+        infos = self._probe_cameras()
+        cameras: List[Dict[str, object]] = []
+        for info in infos:
+            cameras.append(
+                {
+                    "id": info["id"],
+                    "name": info["name"],
+                    "model": info.get("model"),
+                    "selected": info["id"] == self._camera_id,
+                }
+            )
+        usb_device = self._get_usb_device()
+        if usb_device:
+            usb_id = f"usb:{usb_device}"
+            cameras.append(
+                {
+                    "id": usb_id,
+                    "name": f"Webcam USB ({usb_device})",
+                    "model": "V4L2-USB",
+                    "selected": usb_id == self._camera_id,
+                }
+            )
+        return cameras
+
+    def set_active_camera(self, camera_id: str) -> Dict[str, object]:
+        if not HAS_PICAMERA2:
+            raise RuntimeError("picamera2 non disponible.")
+        clean_id = str(camera_id or "").strip()
+        if not clean_id:
+            raise ValueError("Identifiant caméra requis.")
+        infos = self._probe_cameras()
+        if not any(info["id"] == clean_id for info in infos):
+            raise ValueError(f"Caméra introuvable: {clean_id}")
+        if clean_id == self._camera_id:
+            return self.get_settings()
+        self._camera_id = clean_id
+        self._config["camera_id"] = clean_id
+        self._save_config()
+        self._init_camera()
+        return self.get_settings()
+
+    def capture_photo(self) -> Path:
+        if not self.available:
+            raise CameraUnavailable("Caméra indisponible.")
+        filename = f"photo-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
+        target = self.save_directory / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if HAS_PICAMERA2 and self._picam2 is not None:
+            with self._camera_lock:
+                self._ensure_configs()
+                picam = self._picam2
+                if picam is None:
+                    raise CameraUnavailable("Caméra non initialisée.")
+                if hasattr(picam, "switch_mode_and_capture_file") and self._still_config:
+                    picam.switch_mode_and_capture_file(self._still_config, str(target))
+                else:
+                    self._ensure_mode("still")
+                    picam.capture_file(str(target))
+                    self._ensure_mode("preview")
+        else:
+            self._capture_photo_usb(target)
+        self._apply_photo_color_profile(target)
+        return target
+
+    def _capture_photo_usb(self, target: Path) -> None:
+        device = self._get_usb_device()
+        if not device:
+            raise CameraUnavailable("Caméra USB indisponible.")
+        executable = self._find_executable("fswebcam")
+        if not executable:
+            raise CameraUnavailable("fswebcam non disponible.")
+        cmd = [
+            executable,
+            "-d",
+            device,
+            "-r",
+            "1280x720",
+        ]
+        for flip in self._build_fswebcam_flip_args():
+            cmd.extend(["--flip", flip])
+        cmd.extend(["--no-banner", str(target)])
+        with self._camera_lock:
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as exc:
+                logger.error("Capture photo USB échouée: %s", exc)
+                raise CameraUnavailable("Capture USB échouée.") from exc
+
+    def _capture_video_usb(self, duration_seconds: int, target: Path) -> None:
+        device = self._get_usb_device()
+        if not device:
+            raise CameraUnavailable("Caméra USB indisponible.")
+        ffmpeg = self._find_executable("ffmpeg")
+        if not ffmpeg:
+            raise CameraUnavailable("ffmpeg non disponible pour la capture vidéo.")
+        flip_filter = self._build_ffmpeg_flip_filter()
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "v4l2",
+            "-framerate",
+            "25",
+            "-video_size",
+            "1280x720",
+            "-i",
+            device,
+        ]
+        if flip_filter:
+            cmd.extend(["-vf", self._combine_ffmpeg_filters(flip_filter)])
+        else:
+            eq_filter = self._build_ffmpeg_eq_filter()
+            if eq_filter:
+                cmd.extend(["-vf", eq_filter])
+        cmd.extend(
+            [
+                "-t",
+                str(duration_seconds),
+                "-vcodec",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(target),
+            ]
+        )
+        with self._camera_lock:
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as exc:
+                logger.error("Capture vidéo USB échouée: %s", exc)
+                raise CameraUnavailable("Capture vidéo USB indisponible.") from exc
+
+    def _frame_generator_usb(self) -> Iterable[bytes]:
+        device = self._get_usb_device()
+        if not device:
+            raise CameraUnavailable("Caméra USB indisponible.")
+        if HAS_CV2 and cv2 is not None:
+            source = self._cv2_source_from_device(device)
+            cap = None
+            try:
+                if isinstance(source, int):
+                    cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                else:
+                    cap = cv2.VideoCapture(source)
+            except Exception as exc:
+                cap = None
+                logger.warning("Ouverture OpenCV échouée, fallback fswebcam: %s", exc)
+            if cap and cap.isOpened():
+                try:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+                    while True:
+                        with self._camera_lock:
+                            success, frame = cap.read()
+                        if not success:
+                            raise RuntimeError("Lecture OpenCV échouée.")
+                        frame = self._apply_cv2_adjustments(frame)
+                        encoded, buffer = cv2.imencode(".jpg", frame)
+                        if not encoded:
+                            continue
+                        yield buffer.tobytes()
+                        time.sleep(0.2)
+                    return
+                except Exception as exc:
+                    logger.warning("Flux OpenCV interrompu, fallback fswebcam: %s", exc)
+                finally:
+                    cap.release()
+            if cap:
+                cap.release()
+            logger.warning("Capture OpenCV indisponible, fallback fswebcam.")
+        while True:
+            try:
+                with self._camera_lock:
+                    frame = self._capture_usb_frame_bytes(device)
+            except RuntimeError as exc:
+                logger.warning("Capture frame USB manquante: %s", exc)
+                time.sleep(0.75)
+                continue
+            yield frame
+            time.sleep(0.5)
+
+    def _capture_usb_frame_bytes(self, device: str) -> bytes:
+        executable = self._find_executable("fswebcam")
+        if not executable:
+            raise CameraUnavailable("fswebcam non disponible.")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        tmp_path = Path(tmp.name)
+        tmp.close()
+        cmd = [
+            executable,
+            "-d",
+            device,
+            "-r",
+            "1280x720",
+        ]
+        for flip in self._build_fswebcam_flip_args():
+            cmd.extend(["--flip", flip])
+        cmd.extend(["--no-banner", str(tmp_path)])
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            data = tmp_path.read_bytes()
+        except subprocess.CalledProcessError as exc:
+            logger.error("Capture frame USB échouée: %s", exc)
+            raise RuntimeError("Capture frame USB échouée.") from exc
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        return data
+
+    def _apply_photo_color_profile(self, target: Path) -> None:
+        eq_filter = self._build_ffmpeg_eq_filter()
+        if not eq_filter:
+            return
+        ffmpeg = self._find_executable("ffmpeg")
+        if not ffmpeg:
+            return
+        temp = target.with_suffix(target.suffix + ".tmp")
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(target),
+            "-vf",
+            eq_filter,
+            str(temp),
+        ]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            temp.replace(target)
+        except subprocess.CalledProcessError as exc:
+            logger.error("Ajustement photo échoué: %s", exc)
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+        except Exception:
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+
+
+    def capture_video(self, duration_seconds: int) -> Path:
+        if duration_seconds <= 0:
+            raise ValueError("Durée invalide.")
+        if duration_seconds > 600:
+            raise ValueError("Durée trop longue (max 600s).")
+        if not self.available:
+            raise CameraUnavailable("Caméra indisponible.")
+        filename = f"video-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.mp4"
+        target = self.save_directory / filename
+        if HAS_PICAMERA2 and self._picam2 is not None and H264Encoder and FfmpegOutput:
+            encoder = None
+            output = None
+            with self._camera_lock:
+                self._ensure_configs()
+                picam = self._picam2
+                if picam is None:
+                    raise CameraUnavailable("Caméra indisponible.")
+                self._ensure_mode("video")
+                encoder = H264Encoder(bitrate=8_000_000)
+                output = FfmpegOutput(str(target))
+                picam.start_recording(encoder, output)
+            try:
+                time.sleep(duration_seconds)
+            finally:
+                with self._camera_lock:
+                    picam = self._picam2
+                    if picam:
+                        try:
+                            picam.stop_recording()
+                        except Exception as exc:
+                            logger.error("Arrêt enregistrement vidéo impossible: %s", exc)
+                    self._ensure_mode("preview")
+        else:
+            self._capture_video_usb(duration_seconds, target)
+        return target
+
+    def generate_video_thumbnail(self, video_path: Path) -> Optional[Path]:
+        thumbnail = video_path.with_suffix(video_path.suffix + ".jpg")
+        if HAS_CV2:
+            cap = cv2.VideoCapture(str(video_path))
+            success, frame = cap.read()
+            cap.release()
+            if success:
+                cv2.imwrite(str(thumbnail), frame)
+                return thumbnail
+        ffmpeg = self._find_executable("ffmpeg")
+        if ffmpeg:
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                str(thumbnail),
+            ]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return thumbnail
+            except Exception as exc:
+                logger.error("Génération vignette via ffmpeg échouée: %s", exc)
+        return None
+
+    def frame_generator(self) -> Iterable[bytes]:
+        if not self.available:
+            raise CameraUnavailable("Caméra indisponible.")
+        if HAS_PICAMERA2 and self._picam2 is not None:
+            while True:
+                with self._camera_lock:
+                    picam = self._picam2
+                    if picam is None:
+                        raise CameraUnavailable("Caméra indisponible.")
+                    self._ensure_mode("preview")
+                    buffer = io.BytesIO()
+                    try:
+                        picam.capture_file(buffer, format="jpeg")
+                    except Exception as exc:
+                        logger.error("Capture frame échouée: %s", exc)
+                        raise CameraUnavailable("Caméra indisponible.") from exc
+                    frame = buffer.getvalue()
+                yield frame
+                time.sleep(0.2)
+        else:
+            yield from self._frame_generator_usb()
+
+    def list_media(
+        self, media_type: str, sort: str = "desc", page: int = 1, per_page: int = 30
+    ) -> Dict[str, object]:
+        files = self._gather_files(media_type)
+        reverse = sort != "asc"
+        files.sort(key=lambda item: item["modified"], reverse=reverse)
+        page = max(1, page)
+        per_page = max(1, min(per_page, 200))
+        total_pages = max(1, (len(files) + per_page - 1) // per_page)
+        page = min(page, total_pages)
+        start = (page - 1) * per_page
+        end = start + per_page
+        items = files[start:end]
+        return {
+            "items": items,
+            "total_pages": total_pages,
+            "current_page": page,
+        }
+
+    def delete_media(self, filenames: Iterable[str]) -> List[str]:
+        deleted: List[str] = []
+        for name in filenames:
+            if not name:
+                continue
+            try:
+                target = self._resolve_media_path(name)
+            except ValueError:
+                logger.warning("Tentative de suppression hors répertoire: %s", name)
+                continue
+            if not target.exists():
+                continue
+            try:
+                target.unlink()
+                deleted.append(name)
+            except OSError as exc:
+                logger.error("Suppression impossible %s: %s", name, exc)
+                continue
+            if target.suffix.lower() in VIDEO_EXTENSIONS:
+                thumb = target.with_suffix(target.suffix + ".jpg")
+                if thumb.exists():
+                    try:
+                        thumb.unlink()
+                    except OSError:
+                        pass
+        return deleted
+
+    def shutdown(self) -> None:
+        if self._scheduler:
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+        self._close_camera()
+
+    # ---------- Internal ----------
+    def _load_config(self) -> None:
+        if not self.config_path.exists():
+            return
+        try:
+            data = json.loads(self.config_path.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._config.update(
+                    {
+                        "hflip": bool(data.get("hflip", False)),
+                        "vflip": bool(data.get("vflip", False)),
+                        "capture_frequency_hours": float(
+                            data.get("capture_frequency_hours", 6.0)
+                        ),
+                        "save_directory": str(
+                            data.get("save_directory") or str(DEFAULT_SAVE_DIR)
+                        ),
+                        "camera_id": data.get("camera_id"),
+                        "brightness": float(data.get("brightness", 0.0)),
+                        "contrast": float(data.get("contrast", 1.0)),
+                        "saturation": float(data.get("saturation", 1.0)),
+                    }
+                )
+                self._camera_id = self._config.get("camera_id")
+        except Exception as exc:
+            logger.error("Impossible de charger la config caméra: %s", exc)
+
+    def _save_config(self) -> None:
+        try:
+            self.config_path.write_text(
+                json.dumps(self._config, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.error("Impossible d'enregistrer la config caméra: %s", exc)
+
+    def _close_camera(self) -> None:
+        with self._camera_lock:
+            if self._picam2:
+                try:
+                    self._picam2.close()
+                except Exception:
+                    pass
+            self._picam2 = None
+            self._camera_started = False
+            self._current_mode = None
+
+    def _init_camera(self) -> None:
+        self._close_camera()
+        if not HAS_PICAMERA2:
+            logger.warning("picamera2 non disponible sur ce système.")
+            return
+        infos = self._probe_cameras()
+        selected_id = self._ensure_camera_selection(infos)
+        if not selected_id:
+            logger.warning("Aucune caméra détectée.")
+            return
+        target = self._find_camera_info(selected_id)
+        if not target:
+            logger.warning("Caméra %s introuvable.", selected_id)
+            return
+        try:
+            self._picam2 = Picamera2(camera_info=target["raw_info"])
+            self._config_dirty = True
+            self._ensure_configs(force=True)
+            self._ensure_mode("preview")
+        except Exception as exc:
+            logger.error("Initialisation caméra échouée: %s", exc)
+            self._picam2 = None
+
+    def _reconfigure_camera(self) -> None:
+        with self._camera_lock:
+            if self._picam2 is None:
+                return
+            self._config_dirty = True
+            self._ensure_configs(force=True)
+            self._ensure_mode(self._current_mode or "preview")
+
+    def _ensure_configs(self, force: bool = False) -> None:
+        if not HAS_PICAMERA2:
+            return
+        picam = self._picam2
+        if picam is None:
+            return
+        if self._config_dirty:
+            force = True
+        if not force and all(
+            [self._preview_config, self._still_config, self._video_config]
+        ):
+            return
+        transform = self._build_transform()
+        self._preview_config = picam.create_preview_configuration(
+            main={"size": (960, 540)},
+            transform=transform,
+        )
+        self._still_config = picam.create_still_configuration(
+            main={"size": (2304, 1296)},
+            transform=transform,
+        )
+        self._video_config = picam.create_video_configuration(
+            main={"size": (1920, 1080)},
+            transform=transform,
+        )
+        self._config_dirty = False
+
+    def _ensure_mode(self, mode: str) -> None:
+        if not HAS_PICAMERA2:
+            return
+        picam = self._picam2
+        if picam is None:
+            return
+        config_map = {
+            "preview": self._preview_config,
+            "still": self._still_config,
+            "video": self._video_config,
+        }
+        config = config_map.get(mode)
+        if config is None:
+            self._ensure_configs(force=True)
+            config = config_map.get(mode)
+        if config is None:
+            raise CameraUnavailable(f"Configuration '{mode}' indisponible.")
+        if self._current_mode == mode and self._camera_started:
+            return
+        if self._camera_started:
+            picam.stop()
+        picam.configure(config)
+        picam.start()
+        self._camera_started = True
+        self._current_mode = mode
+
+    def _build_transform(self):
+        if Transform is None:
+            return None
+        return Transform(
+            hflip=1 if self._config.get("hflip") else 0,
+            vflip=1 if self._config.get("vflip") else 0,
+        )
+
+    def _gather_files(self, media_type: str) -> List[Dict[str, object]]:
+        files: List[Dict[str, object]] = []
+        if not self.save_directory.exists():
+            return files
+        allowed_ext = (
+            PHOTO_EXTENSIONS if media_type == "photos" else VIDEO_EXTENSIONS
+        )
+        for path in self.save_directory.iterdir():
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix not in allowed_ext:
+                continue
+            stat = path.stat()
+            record = {
+                "filename": path.name,
+                "modified": stat.st_mtime,
+                "thumbnail": None,
+            }
+            if suffix in VIDEO_EXTENSIONS:
+                thumbnail = path.with_suffix(path.suffix + ".jpg")
+                if not thumbnail.exists():
+                    thumb = self.generate_video_thumbnail(path)
+                    thumbnail = thumb if thumb else thumbnail
+                if thumbnail.exists():
+                    record["thumbnail"] = thumbnail.name
+            files.append(record)
+        return files
+
+    def _resolve_media_path(self, filename: str) -> Path:
+        filename = filename.replace("\\", "/")
+        candidate = (self.save_directory / filename).resolve()
+        base = self.save_directory.resolve()
+        if not str(candidate).startswith(str(base)):
+            raise ValueError("Chemin non autorisé.")
+        return candidate
+
+    def _normalize_directory(self, directory: str) -> Path:
+        expanded = os.path.expanduser(directory)
+        path = Path(expanded)
+        if not path.is_absolute():
+            path = (BASE_DIR / path).resolve()
+        return path
+
+    def _find_executable(self, name: str) -> Optional[str]:
+        paths = os.environ.get("PATH", "").split(os.pathsep)
+        for base in paths:
+            candidate = Path(base) / name
+            if os.name == "nt":
+                exts = os.environ.get("PATHEXT", ".EXE").split(";")
+                for ext in exts:
+                    full = candidate.with_suffix(ext.lower())
+                    if full.exists():
+                        return str(full)
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+    def _get_usb_device(self) -> Optional[str]:
+        if self._usb_device and Path(self._usb_device).exists():
+            return self._usb_device
+        device = detect_usb_camera_device()
+        self._usb_device = device
+        return device
+
+    def _get_flip_flags(self) -> Tuple[bool, bool]:
+        return bool(self._config.get("hflip")), bool(self._config.get("vflip"))
+
+    def _build_fswebcam_flip_args(self) -> List[str]:
+        flips: List[str] = []
+        hflip, vflip = self._get_flip_flags()
+        if hflip:
+            flips.append("h")
+        if vflip:
+            flips.append("v")
+        return flips
+
+    def _build_ffmpeg_flip_filter(self) -> Optional[str]:
+        filters: List[str] = []
+        hflip, vflip = self._get_flip_flags()
+        if hflip:
+            filters.append("hflip")
+        if vflip:
+            filters.append("vflip")
+        if not filters:
+            return None
+        return ",".join(filters)
+
+    def _build_ffmpeg_eq_filter(self) -> Optional[str]:
+        brightness = max(-1.0, min(1.0, float(self._config.get("brightness", 0.0))))
+        contrast = max(0.1, min(4.0, float(self._config.get("contrast", 1.0))))
+        saturation = max(0.1, min(4.0, float(self._config.get("saturation", 1.0))))
+        params = []
+        if abs(brightness) > 1e-3:
+            params.append(f"brightness={brightness}")
+        if abs(contrast - 1.0) > 1e-3:
+            params.append(f"contrast={contrast}")
+        if abs(saturation - 1.0) > 1e-3:
+            params.append(f"saturation={saturation}")
+        if not params:
+            return None
+        return "eq=" + ":".join(params)
+
+    def _combine_ffmpeg_filters(self, flip_filter: str) -> str:
+        eq = self._build_ffmpeg_eq_filter()
+        if eq:
+            return f"{flip_filter},{eq}"
+        return flip_filter
+
+    def _apply_cv2_flip(self, frame: Any) -> Any:
+        hflip, vflip = self._get_flip_flags()
+        if hflip and vflip:
+            return cv2.flip(frame, -1)
+        if hflip:
+            return cv2.flip(frame, 1)
+        if vflip:
+            return cv2.flip(frame, 0)
+        return frame
+
+    def _apply_cv2_adjustments(self, frame: Any) -> Any:
+        if cv2 is None:
+            return frame
+        frame = self._apply_cv2_flip(frame)
+        brightness = float(self._config.get("brightness", 0.0))
+        contrast = float(self._config.get("contrast", 1.0))
+        saturation = float(self._config.get("saturation", 1.0))
+        needs_brightness = abs(brightness) > 1e-3
+        needs_contrast = abs(contrast - 1.0) > 1e-3
+        needs_saturation = abs(saturation - 1.0) > 1e-3
+        adjusted = frame
+        if needs_brightness or needs_contrast:
+            beta = max(-255.0, min(255.0, brightness * 255.0))
+            alpha = max(0.1, min(4.0, contrast))
+            adjusted = cv2.convertScaleAbs(adjusted, alpha=alpha, beta=beta)
+        if needs_saturation and np is not None:
+            hsv = cv2.cvtColor(adjusted, cv2.COLOR_BGR2HSV).astype("float32")
+            hsv[..., 1] = np.clip(hsv[..., 1] * saturation, 0, 255)
+            adjusted = cv2.cvtColor(hsv.astype("uint8"), cv2.COLOR_HSV2BGR)
+        return adjusted
+
+    def _cv2_source_from_device(self, device: str) -> Any:
+        base = os.path.basename(device)
+        if base.startswith("video"):
+            index_str = base[5:]
+            try:
+                return int(index_str)
+            except ValueError:
+                pass
+        try:
+            return int(device)
+        except ValueError:
+            return device
+
+    def _init_scheduler(self) -> None:
+        if BackgroundScheduler is None:
+            logger.warning("APScheduler non disponible: capture auto désactivée.")
+            return
+        self._scheduler = BackgroundScheduler()
+        self._scheduler.start()
+        self._reschedule_auto_capture()
+
+    def _reschedule_auto_capture(self) -> None:
+        if not self._scheduler:
+            return
+        existing = self._scheduler.get_job(self._auto_job_id)
+        if existing:
+            existing.remove()
+        hours = float(self._config.get("capture_frequency_hours") or 0)
+        if hours <= 0:
+            return
+        seconds = max(60.0, hours * 3600.0)
+        self._scheduler.add_job(
+            self._auto_capture_task,
+            "interval",
+            seconds=seconds,
+            id=self._auto_job_id,
+            next_run_time=datetime.now(),
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+
+    def _auto_capture_enabled(self) -> bool:
+        if not self._scheduler:
+            return False
+        return self._scheduler.get_job(self._auto_job_id) is not None
+
+    def _auto_capture_task(self) -> None:
+        try:
+            path = self.capture_photo()
+            logger.info("Capture automatique enregistrée: %s", path.name)
+        except Exception as exc:  # pragma: no cover - depends on hardware
+            logger.error("Capture automatique échouée: %s", exc)
+
+    def _probe_cameras(self) -> List[Dict[str, object]]:
+        if not HAS_PICAMERA2:
+            self._camera_infos = []
+            return []
+        try:
+            infos = Picamera2.global_camera_info()
+        except Exception as exc:
+            logger.error("Impossible de lister les caméras: %s", exc)
+            self._camera_infos = []
+            return []
+        parsed: List[Dict[str, object]] = []
+        for idx, info in enumerate(infos):
+            camera_id = info.get("Id") or f"camera_{idx}"
+            model = info.get("Model")
+            name = model or info.get("Location") or f"Caméra {idx + 1}"
+            parsed.append(
+                {
+                    "id": camera_id,
+                    "index": idx,
+                    "name": name,
+                    "model": model,
+                    "raw_info": info,
+                }
+            )
+        self._camera_infos = parsed
+        return parsed
+
+    def _find_camera_info(self, camera_id: str) -> Optional[Dict[str, object]]:
+        for info in self._camera_infos:
+            if info["id"] == camera_id:
+                return info
+        return None
+
+    def _ensure_camera_selection(
+        self, infos: List[Dict[str, object]]
+    ) -> Optional[str]:
+        if not infos:
+            self._camera_id = None
+            self._config["camera_id"] = None
+            self._save_config()
+            return None
+        if self._camera_id:
+            for info in infos:
+                if info["id"] == self._camera_id:
+                    return self._camera_id
+        selected = infos[0]["id"]
+        self._camera_id = selected
+        self._config["camera_id"] = selected
+        self._save_config()
+        return selected
+
+
+camera_manager = CameraManager(CAMERA_CONFIG_PATH)

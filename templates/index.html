@@ -68,6 +68,10 @@
                     Nourriture</button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-camera" type="button" role="tab">📷
+                    Caméra</button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-config" type="button" role="tab">⚙️
                     Configuration</button>
             </li>
@@ -578,6 +582,157 @@
                 </div>
             </div>
 
+
+            <div class="tab-pane fade" id="tab-camera" role="tabpanel">
+                <div class="reef-card">
+                    <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
+                        <div>
+                            <div class="fw-semibold">Caméra & surveillance</div>
+                            <p class="text-secondary small mb-0">Accès direct, programmation et historique des médias.</p>
+                        </div>
+                        <span class="badge reef-badge bg-secondary-subtle text-uppercase" id="cameraStatusBadge">Caméra inconnue</span>
+                    </div>
+                    <ul class="nav nav-tabs camera-subnav mt-3" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#camera-pane-live" type="button" role="tab">Direct</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#camera-pane-photos" type="button" role="tab">Photos</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#camera-pane-videos" type="button" role="tab">Vidéos</button>
+                        </li>
+                    </ul>
+                    <div class="tab-content mt-3">
+                        <div class="tab-pane fade show active" id="camera-pane-live" role="tabpanel">
+                            <div class="row g-4">
+                                <div class="col-lg-7">
+                                    <div class="camera-live-wrapper">
+                                        <img id="cameraLiveFeed" src="/camera_feed" alt="Flux caméra" class="camera-live-image" />
+                                        <div class="camera-live-overlay d-none" id="cameraFeedUnavailable">Caméra indisponible</div>
+                                    </div>
+                                </div>
+                                <div class="col-lg-5">
+                                    <div class="camera-card">
+                                        <div class="section-title mb-2">Configuration rapide</div>
+                                        <div class="mb-3">
+                                            <label class="form-label small" for="cameraDeviceSelect">Caméra active</label>
+                                            <div class="input-group input-group-sm">
+                                                <select id="cameraDeviceSelect" class="form-select form-select-sm"></select>
+                                                <button class="btn btn-outline-light" data-action="cameraChangeDevice">Basculer</button>
+                                            </div>
+                                            <small class="text-secondary d-block mt-1">La caméra sélectionnée est utilisée pour le direct et les captures.</small>
+                                        </div>
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" id="cameraHFlip" />
+                                            <label class="form-check-label small" for="cameraHFlip">Inversion horizontale</label>
+                                        </div>
+                                        <div class="form-check form-switch mb-3">
+                                            <input class="form-check-input" type="checkbox" id="cameraVFlip" />
+                                            <label class="form-check-label small" for="cameraVFlip">Inversion verticale</label>
+                                        </div>
+                                        <div class="row g-2 mb-3 camera-slider-group">
+                                            <div class="col-4">
+                                                <label class="form-label small d-flex justify-content-between align-items-center" for="cameraBrightness">
+                                                    <span>Luminosité</span><span class="slider-value" id="cameraBrightnessValue">0.00</span>
+                                                </label>
+                                                <input type="range" step="0.05" min="-1" max="1" class="form-range" id="cameraBrightness" />
+                                            </div>
+                                            <div class="col-4">
+                                                <label class="form-label small d-flex justify-content-between align-items-center" for="cameraContrast">
+                                                    <span>Contraste</span><span class="slider-value" id="cameraContrastValue">1.00</span>
+                                                </label>
+                                                <input type="range" step="0.05" min="0.1" max="4" class="form-range" id="cameraContrast" />
+                                            </div>
+                                            <div class="col-4">
+                                                <label class="form-label small d-flex justify-content-between align-items-center" for="cameraSaturation">
+                                                    <span>Saturation</span><span class="slider-value" id="cameraSaturationValue">1.00</span>
+                                                </label>
+                                                <input type="range" step="0.05" min="0.1" max="4" class="form-range" id="cameraSaturation" />
+                                            </div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label small" for="cameraRotation">Rotation (°)</label>
+                                            <select class="form-select form-select-sm" id="cameraRotation">
+                                                <option value="-90">-90°</option>
+                                                <option value="0" selected>0°</option>
+                                                <option value="90">90°</option>
+                                            </select>
+                                        </div>
+                                        <label class="form-label small" for="cameraAutoTime">Heure capture auto</label>
+                                        <input type="time" class="form-control form-control-sm mb-3" id="cameraAutoTime" />
+                                        <label class="form-label small" for="cameraSaveDirectory">Répertoire de sauvegarde</label>
+                                        <input type="text" class="form-control form-control-sm mb-3" id="cameraSaveDirectory" placeholder="/home/pi/camera_media" />
+                                        <button class="btn btn-sm btn-aqua w-100" data-action="cameraSaveSettings">Enregistrer</button>
+                                    </div>
+                                    <div class="camera-card mt-3">
+                                        <div class="section-title mb-2">Contrôle manuel</div>
+                                        <button class="btn btn-aqua w-100 mb-3" data-action="cameraCapturePhoto">Prendre une photo</button>
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text">Durée vidéo (s)</span>
+                                            <input type="number" class="form-control" id="cameraVideoDuration" min="1" value="10" />
+                                            <button class="btn btn-outline-light" data-action="cameraCaptureVideo">Enregistrer</button>
+                                        </div>
+                                        <small class="text-secondary d-block mt-2">Les captures sont stockées dans le dossier configuré puis visibles dans les galeries.</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tab-pane fade" id="camera-pane-photos" role="tabpanel">
+                            <div class="row g-3 align-items-center camera-gallery-controls">
+                                <div class="col-sm-4">
+                                    <label class="form-label small">Tri</label>
+                                    <select class="form-select form-select-sm" data-gallery-sort="photos">
+                                        <option value="desc">Plus récents d'abord</option>
+                                        <option value="asc">Plus anciens d'abord</option>
+                                    </select>
+                                </div>
+                                <div class="col-sm-4">
+                                    <div class="form-check mt-4 mt-sm-0">
+                                        <input class="form-check-input" type="checkbox" id="gallerySelectAll_photos" data-gallery-select-all="photos" />
+                                        <label class="form-check-label small" for="gallerySelectAll_photos">Tout sélectionner</label>
+                                    </div>
+                                </div>
+                                <div class="col-sm-4 text-sm-end">
+                                    <button class="btn btn-sm btn-outline-danger mt-3 mt-sm-0" data-gallery-delete="photos">Supprimer la sélection</button>
+                                </div>
+                            </div>
+                            <div class="camera-gallery-grid" id="galleryGrid_photos"></div>
+                            <div class="camera-gallery-pagination">
+                                <button class="btn btn-outline-light btn-sm" data-gallery-prev="photos">Précédent</button>
+                                <span class="small text-secondary" id="galleryPageIndicator_photos">Page 1 sur 1</span>
+                                <button class="btn btn-outline-light btn-sm" data-gallery-next="photos">Suivant</button>
+                            </div>
+                        </div>
+                        <div class="tab-pane fade" id="camera-pane-videos" role="tabpanel">
+                            <div class="row g-3 align-items-center camera-gallery-controls">
+                                <div class="col-sm-4">
+                                    <label class="form-label small">Tri</label>
+                                    <select class="form-select form-select-sm" data-gallery-sort="videos">
+                                        <option value="desc">Plus récents d'abord</option>
+                                        <option value="asc">Plus anciens d'abord</option>
+                                    </select>
+                                </div>
+                                <div class="col-sm-4">
+                                    <div class="form-check mt-4 mt-sm-0">
+                                        <input class="form-check-input" type="checkbox" id="gallerySelectAll_videos" data-gallery-select-all="videos" />
+                                        <label class="form-check-label small" for="gallerySelectAll_videos">Tout sélectionner</label>
+                                    </div>
+                                </div>
+                                <div class="col-sm-4 text-sm-end">
+                                    <button class="btn btn-sm btn-outline-danger mt-3 mt-sm-0" data-gallery-delete="videos">Supprimer la sélection</button>
+                                </div>
+                            </div>
+                            <div class="camera-gallery-grid" id="galleryGrid_videos"></div>
+                            <div class="camera-gallery-pagination">
+                                <button class="btn btn-outline-light btn-sm" data-gallery-prev="videos">Précédent</button>
+                                <span class="small text-secondary" id="galleryPageIndicator_videos">Page 1 sur 1</span>
+                                <button class="btn btn-outline-light btn-sm" data-gallery-next="videos">Suivant</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div class="tab-pane fade" id="tab-config" role="tabpanel">
                 <div class="reef-card mt-3">
                     <div class="fw-semibold mb-2">🏷️ Noms des sondes de température</div>
@@ -728,6 +883,15 @@
             </div>
         </div>
     </div>
+
+    <div id="mediaViewer" class="media-viewer d-none" role="dialog" aria-modal="true">
+        <div class="media-viewer-backdrop"></div>
+        <div class="media-viewer-dialog">
+            <button class="media-viewer-close" id="mediaViewerClose" aria-label="Fermer">&times;</button>
+            <div class="media-viewer-content" id="mediaViewerContent"></div>
+        </div>
+    </div>
+
     <div id="refreshLoader" class="card bg-dark bg-opacity-75 border border-secondary-subtle">
         <div class="card-body py-2 px-3">
             <div class="progress" style="height: 6px;">

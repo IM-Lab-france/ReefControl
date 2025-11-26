@@ -9,6 +9,7 @@
 ];
 const DEFAULT_FEEDER_PUMP_STOP_DURATION = 5;
 const LAST_ACTIVE_TAB_KEY = "reef_active_tab";
+const LAST_CAMERA_SUBTAB_KEY = "reef_camera_subtab";
 
 let refreshTimer = null;
 let currentPumpConfig = {};
@@ -31,6 +32,16 @@ let toastContainer = null;
 let lastAnalysisSummary = null;
 let popinResolver = null;
 let popinIsConfirm = false;
+let cameraSettings = null;
+const GALLERY_DEFAULT_PER_PAGE = 30;
+const galleryState = {
+  photos: { page: 1, perPage: GALLERY_DEFAULT_PER_PAGE, totalPages: 1, sort: "desc" },
+  videos: { page: 1, perPage: GALLERY_DEFAULT_PER_PAGE, totalPages: 1, sort: "desc" },
+};
+let mediaViewerEl = null;
+let mediaViewerContentEl = null;
+let cameraLiveImageEl = null;
+let cameraLiveOverlayEl = null;
 const ANALYSIS_PERIOD_LABELS = {
   last_3_days: "0 à -3 jours",
   last_week: "-3 à -7 jours",
@@ -926,6 +937,45 @@ function setupTabPersistence() {
   }
 }
 
+function setupCameraSubnavPersistence() {
+  const cameraButtons = document.querySelectorAll(
+    '#tab-camera [data-bs-toggle="tab"][data-bs-target^="#camera-pane-"]'
+  );
+  if (!cameraButtons.length) {
+    return;
+  }
+  cameraButtons.forEach((btn) => {
+    btn.addEventListener("shown.bs.tab", (event) => {
+      const target =
+        event.target instanceof Element
+          ? event.target.getAttribute("data-bs-target")
+          : null;
+      if (target) {
+        try {
+          localStorage.setItem(LAST_CAMERA_SUBTAB_KEY, target);
+        } catch (err) {
+          console.warn("Unable to persist camera subtab", err);
+        }
+      }
+    });
+  });
+  let stored = null;
+  try {
+    stored = localStorage.getItem(LAST_CAMERA_SUBTAB_KEY);
+  } catch (err) {
+    stored = null;
+  }
+  if (stored) {
+    const trigger = document.querySelector(
+      `#tab-camera [data-bs-toggle="tab"][data-bs-target="${stored}"]`
+    );
+    if (trigger) {
+      const tabInstance = bootstrap.Tab.getOrCreateInstance(trigger);
+      tabInstance.show();
+    }
+  }
+}
+
 async function saveTempNames() {
   const payload = {
     temp_1: document.getElementById("tempName_temp1")?.value || "",
@@ -1212,6 +1262,10 @@ const clickHandlers = {
   saveFeederSchedule: () => saveFeederSchedule(),
   prepareAiAnalysis: () => prepareAiAnalysis(),
   get_ai_analysis: () => getAiAnalysis(),
+  cameraSaveSettings: () => saveCameraSettings(),
+  cameraCapturePhoto: () => captureCameraPhoto(),
+  cameraCaptureVideo: () => captureCameraVideo(),
+  cameraChangeDevice: () => changeCameraDevice(),
 };
 
 const changeHandlers = {
@@ -1292,10 +1346,529 @@ function initDelegates() {
   toastContainer = document.getElementById("toastContainer");
 }
 
+async function loadCameraSettings() {
+  try {
+    const res = await fetch("/camera/settings");
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.error || "Réponse invalide");
+    }
+    cameraSettings = data.settings || {};
+    applyCameraSettingsToUI(cameraSettings);
+  } catch (err) {
+    console.error("loadCameraSettings", err);
+    showToast(`Impossible de charger la caméra: ${err.message}`, "danger");
+  }
+}
+
+function applyCameraSettingsToUI(settings = {}) {
+  const hflip = document.getElementById("cameraHFlip");
+  if (hflip) hflip.checked = !!settings.hflip;
+  const vflip = document.getElementById("cameraVFlip");
+  if (vflip) vflip.checked = !!settings.vflip;
+  const autoTime = document.getElementById("cameraAutoTime");
+  if (autoTime && !autoTime.matches(":focus")) {
+    autoTime.value = settings.auto_capture_time || "";
+  }
+  setCameraSliderValue(
+    "cameraBrightness",
+    typeof settings.brightness === "number" ? settings.brightness : 0
+  );
+  setCameraSliderValue(
+    "cameraContrast",
+    typeof settings.contrast === "number" ? settings.contrast : 1
+  );
+  setCameraSliderValue(
+    "cameraSaturation",
+    typeof settings.saturation === "number" ? settings.saturation : 1
+  );
+  const rotationSelect = document.getElementById("cameraRotation");
+  if (rotationSelect && !rotationSelect.matches(":focus")) {
+    const rotation = typeof settings.rotation === "number" ? settings.rotation : 0;
+    rotationSelect.value = String(rotation);
+  }
+  const dirInput = document.getElementById("cameraSaveDirectory");
+  if (dirInput && !dirInput.matches(":focus")) {
+    dirInput.value = settings.save_directory || "";
+  }
+  populateCameraDeviceSelect(settings);
+  const badge = document.getElementById("cameraStatusBadge");
+  const available = !!settings.camera_available;
+  if (badge) {
+    badge.textContent = available ? "Caméra prête" : "Caméra indisponible";
+    badge.classList.toggle("bg-success", available);
+    badge.classList.toggle("bg-secondary-subtle", !available);
+  }
+  handleCameraFeedState(available);
+}
+
+function populateCameraDeviceSelect(settings = {}) {
+  const select = document.getElementById("cameraDeviceSelect");
+  if (!select) return;
+  const cameras = Array.isArray(settings.cameras) ? settings.cameras : [];
+  select.innerHTML = "";
+  if (!cameras.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "Aucune caméra détectée";
+    select.appendChild(opt);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  cameras.forEach((cam) => {
+    const opt = document.createElement("option");
+    opt.value = cam.id;
+    opt.textContent = cam.name || cam.model || cam.id;
+    if (cam.selected) {
+      opt.selected = true;
+    }
+    select.appendChild(opt);
+  });
+  if (!select.value && cameras[0]) {
+    select.value = cameras[0].id;
+  }
+}
+
+async function saveCameraSettings() {
+  const payload = {
+    hflip: !!document.getElementById("cameraHFlip")?.checked,
+    vflip: !!document.getElementById("cameraVFlip")?.checked,
+    auto_capture_time:
+      document.getElementById("cameraAutoTime")?.value?.trim() || "",
+    save_directory: document.getElementById("cameraSaveDirectory")?.value || "",
+    brightness: parseFloat(
+      document.getElementById("cameraBrightness")?.value || "0"
+    ),
+    contrast: parseFloat(
+      document.getElementById("cameraContrast")?.value || "1"
+    ),
+    saturation: parseFloat(
+      document.getElementById("cameraSaturation")?.value || "1"
+    ),
+    rotation: parseInt(
+      document.getElementById("cameraRotation")?.value || "0",
+      10
+    ),
+  };
+  if (!isFinite(payload.brightness)) payload.brightness = 0;
+  if (!isFinite(payload.contrast)) payload.contrast = 1;
+  if (!isFinite(payload.saturation)) payload.saturation = 1;
+  try {
+    const res = await fetch("/camera/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    cameraSettings = data.settings || payload;
+    applyCameraSettingsToUI(cameraSettings);
+    showToast("Configuration caméra enregistrée.", "success");
+  } catch (err) {
+    console.error("saveCameraSettings", err);
+    showToast(`Erreur configuration caméra: ${err.message}`, "danger");
+  }
+}
+
+function setCameraSliderValue(id, value) {
+  const input = document.getElementById(id);
+  if (input && !input.matches(":active")) {
+    input.value = String(value);
+  }
+  updateCameraSliderDisplay(id);
+}
+
+function updateCameraSliderDisplay(id) {
+  const input = document.getElementById(id);
+  const label = document.getElementById(`${id}Value`);
+  if (!input || !label) {
+    return;
+  }
+  const numericValue = parseFloat(input.value);
+  label.textContent = Number.isFinite(numericValue)
+    ? numericValue.toFixed(2)
+    : "--";
+}
+
+function initCameraModule() {
+  cameraLiveImageEl = document.getElementById("cameraLiveFeed");
+  cameraLiveOverlayEl = document.getElementById("cameraFeedUnavailable");
+  setupCameraSubnavPersistence();
+  ["cameraBrightness", "cameraContrast", "cameraSaturation"].forEach((id) => {
+    const input = document.getElementById(id);
+    if (input) {
+      input.addEventListener("input", () => updateCameraSliderDisplay(id));
+      updateCameraSliderDisplay(id);
+    }
+  });
+  if (cameraLiveImageEl) {
+    cameraLiveImageEl.addEventListener("error", () => handleCameraFeedState(false));
+    cameraLiveImageEl.addEventListener("load", () =>
+      handleCameraFeedState(true)
+    );
+  }
+  initMediaViewer();
+  loadCameraSettings();
+  ["photos", "videos"].forEach((mediaType) => {
+    const sortSelect = document.querySelector(
+      `[data-gallery-sort="${mediaType}"]`
+    );
+    if (sortSelect) {
+      sortSelect.addEventListener("change", () => {
+        loadGallery(mediaType, 1, sortSelect.value || "desc");
+      });
+    }
+    const selectAll = document.querySelector(
+      `[data-gallery-select-all="${mediaType}"]`
+    );
+    if (selectAll) {
+      selectAll.addEventListener("change", (event) => {
+        toggleGallerySelectAll(mediaType, event.target.checked);
+      });
+    }
+    const deleteBtn = document.querySelector(
+      `[data-gallery-delete="${mediaType}"]`
+    );
+    if (deleteBtn) {
+      deleteBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        deleteGallerySelection(mediaType);
+      });
+    }
+    const prevBtn = document.querySelector(
+      `[data-gallery-prev="${mediaType}"]`
+    );
+    if (prevBtn) {
+      prevBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        const state = galleryState[mediaType];
+        if (state.page > 1) {
+          loadGallery(mediaType, state.page - 1);
+        }
+      });
+    }
+    const nextBtn = document.querySelector(
+      `[data-gallery-next="${mediaType}"]`
+    );
+    if (nextBtn) {
+      nextBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        const state = galleryState[mediaType];
+        if (state.page < state.totalPages) {
+          loadGallery(mediaType, state.page + 1);
+        }
+      });
+    }
+    const grid = document.getElementById(`galleryGrid_${mediaType}`);
+    if (grid) {
+      grid.addEventListener("click", (event) =>
+        handleGalleryGridClick(mediaType, event)
+      );
+    }
+    loadGallery(mediaType);
+  });
+}
+
+function handleCameraFeedState(isAvailable) {
+  if (cameraLiveOverlayEl) {
+    cameraLiveOverlayEl.classList.toggle("d-none", !!isAvailable);
+  }
+}
+
+async function captureCameraPhoto() {
+  try {
+    const res = await fetch("/camera/capture_photo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    showToast("Photo enregistrée.", "success");
+    await loadGallery("photos");
+  } catch (err) {
+    console.error("captureCameraPhoto", err);
+    showToast(`Capture photo impossible: ${err.message}`, "danger");
+  }
+}
+
+async function captureCameraVideo() {
+  const durationInput = document.getElementById("cameraVideoDuration");
+  let duration = parseInt(durationInput?.value || "0", 10);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    duration = 10;
+  }
+  try {
+    const res = await fetch("/camera/capture_video", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ duration_seconds: duration }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    showToast(`Vidéo enregistrée (${duration}s).`, "success");
+    await loadGallery("videos");
+  } catch (err) {
+    console.error("captureCameraVideo", err);
+    showToast(`Capture vidéo impossible: ${err.message}`, "danger");
+  }
+}
+
+async function changeCameraDevice() {
+  const select = document.getElementById("cameraDeviceSelect");
+  if (!select) return;
+  const cameraId = select.value;
+  if (!cameraId) {
+    showToast("Aucune caméra sélectionnée.", "warning");
+    return;
+  }
+  try {
+    const res = await fetch("/camera/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ camera_id: cameraId }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    cameraSettings = data.settings || cameraSettings;
+    applyCameraSettingsToUI(cameraSettings);
+    showToast("Caméra changée.", "success");
+  } catch (err) {
+    console.error("changeCameraDevice", err);
+    showToast(`Impossible de changer de caméra: ${err.message}`, "danger");
+  }
+}
+
+async function loadGallery(mediaType, pageOverride, sortOverride) {
+  const state = galleryState[mediaType];
+  if (!state) return;
+  if (typeof pageOverride === "number") {
+    state.page = Math.max(1, pageOverride);
+  }
+  if (typeof sortOverride === "string") {
+    state.sort = sortOverride;
+  }
+  const grid = document.getElementById(`galleryGrid_${mediaType}`);
+  if (!grid) return;
+  grid.innerHTML =
+    '<div class="text-center text-secondary py-3">Chargement...</div>';
+  try {
+    const params = new URLSearchParams({
+      type: mediaType,
+      page: String(state.page),
+      sort: state.sort,
+      per_page: String(state.perPage),
+    });
+    const res = await fetch(`/gallery/media?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    state.totalPages = Math.max(1, data.total_pages || 1);
+    state.page = Math.min(state.page, state.totalPages);
+    renderGallery(mediaType, data.items || []);
+    updateGalleryPagination(mediaType);
+  } catch (err) {
+    console.error("loadGallery", err);
+    grid.innerHTML = `<div class="alert alert-danger">Impossible de charger la galerie: ${err.message}</div>`;
+  }
+}
+
+function renderGallery(mediaType, items) {
+  const grid = document.getElementById(`galleryGrid_${mediaType}`);
+  const selectAll = document.querySelector(
+    `[data-gallery-select-all="${mediaType}"]`
+  );
+  if (!grid) return;
+  grid.innerHTML = "";
+  if (selectAll) {
+    selectAll.checked = false;
+  }
+  if (!items.length) {
+    grid.innerHTML =
+      '<div class="text-center text-secondary py-4">Aucun média pour le moment.</div>';
+    return;
+  }
+  items.forEach((item, index) => {
+    const inputId = `${mediaType}_media_${index}_${Date.now()}`;
+    const wrapper = document.createElement("div");
+    wrapper.className = `camera-gallery-item ${
+      mediaType === "videos" ? "is-video" : ""
+    }`;
+    const thumbUrl = item.thumbnail_url || item.url;
+    wrapper.innerHTML = `
+      <div class="camera-gallery-thumb" data-media-url="${item.url}" data-media-type="${mediaType}">
+        <img src="${thumbUrl}" alt="${item.filename}">
+        ${
+          mediaType === "videos"
+            ? '<span class="gallery-badge">Vidéo</span>'
+            : ""
+        }
+      </div>
+      <div class="camera-gallery-meta">
+        <div class="form-check">
+          <input class="form-check-input gallery-select" type="checkbox" id="${inputId}" data-filename="${
+      item.filename
+    }">
+          <label class="form-check-label small text-truncate" for="${inputId}">${
+      item.filename
+    }</label>
+        </div>
+      </div>
+    `;
+    grid.appendChild(wrapper);
+  });
+}
+
+function updateGalleryPagination(mediaType) {
+  const state = galleryState[mediaType];
+  if (!state) return;
+  const indicator = document.getElementById(
+    `galleryPageIndicator_${mediaType}`
+  );
+  if (indicator) {
+    indicator.textContent = `Page ${state.page} sur ${state.totalPages}`;
+  }
+  const prevBtn = document.querySelector(
+    `[data-gallery-prev="${mediaType}"]`
+  );
+  if (prevBtn) {
+    prevBtn.disabled = state.page <= 1;
+  }
+  const nextBtn = document.querySelector(
+    `[data-gallery-next="${mediaType}"]`
+  );
+  if (nextBtn) {
+    nextBtn.disabled = state.page >= state.totalPages;
+  }
+}
+
+function toggleGallerySelectAll(mediaType, checked) {
+  const grid = document.getElementById(`galleryGrid_${mediaType}`);
+  if (!grid) return;
+  grid.querySelectorAll(".gallery-select").forEach((input) => {
+    input.checked = checked;
+  });
+}
+
+function handleGalleryGridClick(mediaType, event) {
+  const checkbox = event.target.closest(".gallery-select");
+  if (checkbox) {
+    return;
+  }
+  const thumb = event.target.closest(".camera-gallery-thumb");
+  if (!thumb) return;
+  const url = thumb.dataset.mediaUrl;
+  if (!url) return;
+  openMediaViewer(url, thumb.dataset.mediaType || mediaType);
+}
+
+async function deleteGallerySelection(mediaType) {
+  const grid = document.getElementById(`galleryGrid_${mediaType}`);
+  if (!grid) return;
+  const checked = Array.from(
+    grid.querySelectorAll(".gallery-select:checked")
+  );
+  if (!checked.length) {
+    showToast("Sélectionnez au moins un média.", "warning");
+    return;
+  }
+  const filenames = checked
+    .map((input) => input.dataset.filename)
+    .filter(Boolean);
+  if (
+    !window.confirm(
+      `Êtes-vous sûr de vouloir supprimer ces ${filenames.length} élément(s) ?`
+    )
+  ) {
+    return;
+  }
+  try {
+    const res = await fetch("/gallery/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    showToast("Médias supprimés.", "success");
+    await loadGallery(mediaType);
+  } catch (err) {
+    console.error("deleteGallerySelection", err);
+    showToast(`Suppression impossible: ${err.message}`, "danger");
+  }
+}
+
+function initMediaViewer() {
+  mediaViewerEl = document.getElementById("mediaViewer");
+  mediaViewerContentEl = document.getElementById("mediaViewerContent");
+  const closeBtn = document.getElementById("mediaViewerClose");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => hideMediaViewer());
+  }
+  if (mediaViewerEl) {
+    mediaViewerEl.addEventListener("click", (event) => {
+      if (
+        event.target === mediaViewerEl ||
+        event.target.classList.contains("media-viewer-backdrop")
+      ) {
+        hideMediaViewer();
+      }
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideMediaViewer();
+    }
+  });
+}
+
+function openMediaViewer(url, mediaType) {
+  if (!mediaViewerEl || !mediaViewerContentEl) return;
+  mediaViewerContentEl.innerHTML = "";
+  if (mediaType === "videos") {
+    const video = document.createElement("video");
+    video.src = url;
+    video.controls = true;
+    video.autoplay = true;
+    video.className = "w-100";
+    mediaViewerContentEl.appendChild(video);
+  } else {
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "Media";
+    mediaViewerContentEl.appendChild(img);
+  }
+  mediaViewerEl.classList.remove("d-none");
+  mediaViewerEl.classList.add("show");
+}
+
+function hideMediaViewer() {
+  if (!mediaViewerEl || !mediaViewerContentEl) return;
+  mediaViewerEl.classList.add("d-none");
+  mediaViewerEl.classList.remove("show");
+  mediaViewerContentEl.innerHTML = "";
+}
+
 function init() {
   initDelegates();
   setupTabPersistence();
   initPopin();
+  initCameraModule();
   refreshPorts();
   refreshState();
   nextRefreshAt = Date.now() + refreshIntervalMs;
