@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
@@ -673,6 +674,38 @@ class ReefController:
                 else:
                     entry.setdefault("time", None)
 
+    def _normalize_peristaltic_history_entry(
+        self, entry: Any
+    ) -> Optional[Dict[str, str]]:
+        if isinstance(entry, dict):
+            label = self._normalize_time_string(entry.get("label") or entry.get("time"))
+            timestamp = entry.get("timestamp")
+            if isinstance(timestamp, str):
+                timestamp = timestamp.strip() or None
+            else:
+                timestamp = None
+            date_text = entry.get("date")
+            if isinstance(date_text, str):
+                date_text = date_text.strip() or None
+            else:
+                date_text = None
+            if not date_text and timestamp and "T" in timestamp:
+                date_text = timestamp.split("T", 1)[0]
+        elif isinstance(entry, str):
+            label = self._normalize_time_string(entry)
+            timestamp = None
+            date_text = None
+        else:
+            return None
+        if not label:
+            return None
+        normalized_entry: Dict[str, str] = {"label": label}
+        if date_text:
+            normalized_entry["date"] = date_text
+        if timestamp:
+            normalized_entry["timestamp"] = timestamp
+        return normalized_entry
+
     def _load_peristaltic_last_runs(self) -> None:
         if not PERISTALTIC_LAST_RUNS_PATH.exists():
             return
@@ -685,14 +718,24 @@ class ReefController:
             return
         with self._peristaltic_runs_lock:
             for axis in ("X", "Y", "Z", "E"):
-                value = data.get(axis)
-                normalized = self._normalize_time_string(value)
-                self._peristaltic_last_runs[axis] = normalized
+                raw_history = data.get(axis, [])
+                normalized_history: list[Dict[str, str]] = []
+                if isinstance(raw_history, list):
+                    source_iterable = raw_history
+                else:
+                    source_iterable = [raw_history]
+                for item in source_iterable:
+                    normalized_entry = self._normalize_peristaltic_history_entry(item)
+                    if normalized_entry:
+                        normalized_history.append(normalized_entry)
+                if len(normalized_history) > 7:
+                    normalized_history = normalized_history[-7:]
+                self._peristaltic_last_runs[axis] = normalized_history
 
     def _save_peristaltic_last_runs(self) -> None:
         with self._peristaltic_runs_lock:
             payload = {
-                axis: self._peristaltic_last_runs.get(axis)
+                axis: list(self._peristaltic_last_runs.get(axis, []))
                 for axis in ("X", "Y", "Z", "E")
             }
         try:
@@ -704,6 +747,17 @@ class ReefController:
 
     def _current_minute_label(self) -> str:
         return time.strftime("%H:%M", time.localtime())
+
+    def _current_date_label(self) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime())
+
+    def _current_utc_iso(self) -> str:
+        return (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
 
     def _ensure_peristaltic_not_recent(self, axis: str, minute_label: str) -> None:
         normalized = self._normalize_time_string(minute_label)
@@ -717,6 +771,13 @@ class ReefController:
                     f"Pompe {axis_key} déjà déclenchée à {normalized}, attendre la minute suivante."
                 )
 
+    def _build_peristaltic_history_entry(self, label: str) -> Dict[str, str]:
+        return {
+            "label": label,
+            "date": self._current_date_label(),
+            "timestamp": self._current_utc_iso(),
+        }
+
     def _record_peristaltic_run_label(self, axis: str, minute_label: str) -> None:
         normalized = self._normalize_time_string(minute_label)
         if not normalized:
@@ -726,9 +787,7 @@ class ReefController:
         with self._peristaltic_runs_lock:
             history = self._peristaltic_last_runs.setdefault(axis_key, [])
             if not history or history[-1].get("label") != normalized:
-                history.append(
-                    {"timestamp": datetime.utcnow().isoformat(), "label": normalized}
-                )
+                history.append(self._build_peristaltic_history_entry(normalized))
                 if len(history) > 7:
                     del history[:-7]
                 changed = True
@@ -2756,6 +2815,11 @@ class ReefController:
             payload.update(self.state)
             payload["global_speed"] = self.global_speed
             payload["heat_targets"] = self.state.get("heat_targets", {}).copy()
+        with self._peristaltic_runs_lock:
+            payload["peristaltic_history"] = {
+                axis: [entry.copy() for entry in self._peristaltic_last_runs.get(axis, [])]
+                for axis in ("X", "Y", "Z", "E")
+            }
         return payload
 
 

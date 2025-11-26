@@ -425,6 +425,7 @@ async function pumpGo(axis) {
   const backwards = cfg.direction < 0;
   await apiAction("set_steps_speed", { steps, speed: globalSpeedUs });
   await apiAction("pump", { axis, backwards });
+  refreshState();
 }
 
 async function savePumpSchedule(axis) {
@@ -700,6 +701,7 @@ function applyStateToUI(state) {
   if (peristalticAutoToggle) {
     peristalticAutoToggle.checked = !!state.peristaltic_auto;
   }
+  renderPeristalticHistory(state.peristaltic_history || {});
 
   const gsi = document.getElementById("globalSpeedInput");
   if (gsi) {
@@ -1005,6 +1007,62 @@ async function toggleFanManual(forceState) {
   }
   await apiAction("fan_manual", params);
   refreshState();
+}
+
+function renderPeristalticHistory(historyMap = {}) {
+  const tbody = document.getElementById("peristalticHistoryBody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  const axes = ["X", "Y", "Z", "E"];
+  let rowCount = 0;
+  axes.forEach((axis) => {
+    const entries = Array.isArray(historyMap?.[axis])
+      ? historyMap[axis]
+      : [];
+    const recent = entries.slice(-7).reverse();
+    recent.forEach((entry) => {
+      const tr = document.createElement("tr");
+      const axisCell = document.createElement("td");
+      axisCell.textContent = `Pompe ${axis}`;
+      axisCell.classList.add("text-nowrap");
+      tr.appendChild(axisCell);
+      const iso =
+        typeof entry?.timestamp === "string" ? entry.timestamp : "";
+      let dateText =
+        typeof entry?.date === "string" && entry.date ? entry.date : "";
+      if (!dateText && iso.includes("T")) {
+        dateText = iso.split("T", 1)[0];
+      }
+      let timeText =
+        typeof entry?.label === "string" && entry.label ? entry.label : "";
+      if (!timeText && iso.includes("T")) {
+        timeText = iso.split("T")[1].slice(0, 5);
+      }
+      const dateCell = document.createElement("td");
+      dateCell.textContent = dateText || "--";
+      if (iso) {
+        dateCell.title = iso;
+      }
+      tr.appendChild(dateCell);
+      const timeCell = document.createElement("td");
+      timeCell.textContent = timeText || "--:--";
+      if (iso) {
+        timeCell.title = iso;
+      }
+      tr.appendChild(timeCell);
+      tbody.appendChild(tr);
+      rowCount += 1;
+    });
+  });
+  if (rowCount === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "text-center text-secondary small";
+    td.textContent = "Aucune action peristaltique";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
 }
 
 async function applyHeatHyst() {
