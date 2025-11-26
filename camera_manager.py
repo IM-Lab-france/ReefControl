@@ -95,6 +95,7 @@ class CameraManager:
         self._camera_infos: List[Dict[str, object]] = []
         self._camera_id: Optional[str] = None
         self._usb_device: Optional[str] = detect_usb_camera_device()
+        self._ffmpeg_eq_available = True
         self._load_config()
         self.save_directory = self._normalize_directory(
             self._config.get("save_directory") or str(DEFAULT_SAVE_DIR)
@@ -260,22 +261,19 @@ class CameraManager:
         ]
         for flip in self._build_fswebcam_flip_args():
             cmd.extend(["--flip", flip])
-        target_tmp = target
-        rotation = self._get_rotation_degrees()
-        if rotation:
-            target_tmp = target.with_suffix(target.suffix + ".raw.jpg")
-        cmd.extend(["--no-banner", str(target_tmp)])
+        cmd.extend(["--no-banner", str(target)])
         with self._camera_lock:
             try:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             except subprocess.CalledProcessError as exc:
                 logger.error("Capture photo USB échouée: %s", exc)
                 raise CameraUnavailable("Capture USB échouée.") from exc
-        if rotation:
-            self._rotate_file(target_tmp, target, rotation)
-            if target_tmp.exists():
-                target_tmp.unlink()
-
     def _capture_video_usb(self, duration_seconds: int, target: Path) -> None:
         device = self._get_usb_device()
         if not device:
@@ -299,7 +297,7 @@ class CameraManager:
         filters = []
         if flip_filter:
             filters.append(flip_filter)
-        eq_filter = self._build_ffmpeg_eq_filter()
+        eq_filter = self._build_ffmpeg_eq_filter() if self._ffmpeg_eq_available else None
         if eq_filter:
             filters.append(eq_filter)
         rotation_filter = self._build_rotation_filter()
@@ -320,7 +318,13 @@ class CameraManager:
         )
         with self._camera_lock:
             try:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             except subprocess.CalledProcessError as exc:
                 logger.error("Capture vidéo USB échouée: %s", exc)
                 raise CameraUnavailable("Capture vidéo USB indisponible.") from exc
@@ -418,27 +422,45 @@ class CameraManager:
         return data
 
     def _apply_photo_color_profile(self, target: Path) -> None:
-        eq_filter = self._build_ffmpeg_eq_filter()
-        if not eq_filter:
-            return
         ffmpeg = self._find_executable("ffmpeg")
         if not ffmpeg:
             return
-        temp = target.with_suffix(target.suffix + ".tmp")
+        filters: list[str] = []
+        if self._ffmpeg_eq_available:
+            eq_filter = self._build_ffmpeg_eq_filter()
+            if eq_filter:
+                filters.append(eq_filter)
+        rotation_filter = self._build_rotation_filter()
+        if rotation_filter:
+            filters.append(rotation_filter)
+        if not filters:
+            return
+        temp = target.with_name(f"{target.stem}.tmp{target.suffix}")
         cmd = [
             ffmpeg,
             "-y",
             "-i",
             str(target),
             "-vf",
-            eq_filter,
+            ",".join(filters),
             str(temp),
         ]
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             temp.replace(target)
         except subprocess.CalledProcessError as exc:
             logger.error("Ajustement photo échoué: %s", exc)
+            if exc.stderr:
+                logger.error("ffmpeg (photo) : %s", exc.stderr.strip())
+            if self._ffmpeg_eq_available:
+                self._ffmpeg_eq_available = False
+                logger.warning("Filtre ffmpeg 'eq' indisponible ou défaillant, désactivation des ajustements photo.")
             try:
                 temp.unlink()
             except OSError:
@@ -450,7 +472,9 @@ class CameraManager:
                 pass
 
     def _apply_color_profile_bytes(self, data: bytes, rotation: int = 0, ffmpeg_path: Optional[str] = None) -> bytes:
-        eq_filter = self._build_ffmpeg_eq_filter()
+        eq_filter = (
+            self._build_ffmpeg_eq_filter() if self._ffmpeg_eq_available else None
+        )
         rotation_filter = self._build_rotation_filter() if rotation else None
         filters = []
         if eq_filter:
@@ -477,10 +501,21 @@ class CameraManager:
             str(tmp_out),
         ]
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             result = tmp_out.read_bytes()
         except subprocess.CalledProcessError as exc:
             logger.error("Ajustement image en mémoire échoué: %s", exc)
+            if exc.stderr:
+                logger.error("ffmpeg (stream) : %s", exc.stderr.strip())
+            if self._ffmpeg_eq_available:
+                self._ffmpeg_eq_available = False
+                logger.warning("Filtre ffmpeg 'eq' indisponible ou défaillant, désactivation des ajustements photo.")
             result = data
         except Exception:
             result = data
