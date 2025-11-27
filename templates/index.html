@@ -48,6 +48,10 @@
                     role="tab">🏠 Dashboard</button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-logbook" type="button"
+                    role="tab">📘 Journal</button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-pumps" type="button" role="tab">💧
                     Pompes</button>
             </li>
@@ -204,7 +208,52 @@
                 </div>
             </div>
 
-            <div class="tab-pane fade" id="tab-pumps" role="tabpanel">
+                        <div class="tab-pane fade" id="tab-logbook" role="tabpanel">
+                <div class="row g-3">
+                    <div class="col-lg-4">
+                        <div class="reef-card h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div>
+                                    <div class="fw-semibold mb-0">Nouvelle entree</div>
+                                    <small class="text-secondary">Ajoutez vos notes et photos.</small>
+                                </div>
+                                <button class="btn btn-sm btn-outline-light" data-action="logbookReset">Effacer</button>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label small" for="logbookText">Texte libre</label>
+                                <textarea id="logbookText" class="form-control form-control-sm logbook-textarea" rows="8" placeholder="Observations, maintenance, evolution des coraux..."></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label small" for="logbookPhotos">Photos (optionnel)</label>
+                                <input type="file" id="logbookPhotos" class="form-control form-control-sm" multiple accept="image/*" />
+                                <div id="logbookSelectedFiles" class="logbook-selected-files small text-secondary mt-1"></div>
+                                <small class="text-secondary d-block mt-1">Les fichiers sont stockes dans la galerie camera avec horodatage.</small>
+                            </div>
+                            <div id="logbookFormStatus" class="small text-secondary mb-2"></div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-aqua flex-fill" data-action="logbookSubmit">Enregistrer</button>
+                                <button class="btn btn-outline-light" data-action="logbookRefresh" title="Recharger les entrees">Actualiser</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-8">
+                        <div class="reef-card h-100 logbook-history-card">
+                            <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                                <div>
+                                    <div class="fw-semibold mb-0">Journal de bord</div>
+                                    <small class="text-secondary">Les dernieres entrees s'affichent en premier.</small>
+                                </div>
+                                <button class="btn btn-sm btn-outline-light" data-action="logbookRefresh">Actualiser</button>
+                            </div>
+                            <div id="logbookEntriesLoader" class="text-secondary small">Chargement du journal...</div>
+                            <div id="logbookEntriesEmpty" class="text-secondary small d-none">Aucune entree pour le moment.</div>
+                            <div id="logbookEntriesList" class="logbook-timeline"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+<div class="tab-pane fade" id="tab-pumps" role="tabpanel">
                 <div class="reef-card">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <div class="fw-semibold mb-0">⛲ Pompes péristaltiques</div>

@@ -1,52 +1,100 @@
 import atexit
-
-
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List
+from uuid import uuid4
 
 from flask import (
-
     Flask,
-
     Response,
-
     jsonify,
-
     render_template,
-
     request,
-
     send_from_directory,
-
     stream_with_context,
-
     url_for,
-
 )
-
-
+from werkzeug.datastructures import FileStorage
+from werkzeug.utils import secure_filename
 
 from analysis import (
-
     OPENAI_KEY_MISSING_ERROR as ANALYSIS_KEY_MISSING_ERROR,
-
     ask_aquarium_ai,
-
     build_summary,
-
     load_analysis_queries,
-
     save_analysis_queries,
-
 )
-
 from controller import controller, list_serial_ports
-
 from camera_manager import CameraUnavailable, camera_manager
 
 
 
 
 
+BASE_DIR = Path(__file__).resolve().parent
+LOGBOOK_PATH = BASE_DIR / "logbook_entries.json"
+LOGBOOK_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+MAX_LOGBOOK_PHOTOS = 8
+
 app = Flask(__name__)
+
+
+def _load_logbook_entries() -> List[Dict[str, object]]:
+    if not LOGBOOK_PATH.exists():
+        return []
+    try:
+        data = json.loads(LOGBOOK_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        app.logger.warning("Fichier journal corrompu, reinitialisation.")
+        return []
+    if not isinstance(data, list):
+        return []
+    cleaned: List[Dict[str, object]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        cleaned.append(entry)
+    return cleaned
+
+
+def _save_logbook_entries(entries: List[Dict[str, object]]) -> None:
+    LOGBOOK_PATH.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+
+def _store_logbook_photo(file_obj: FileStorage) -> str:
+    filename = file_obj.filename or ""
+    ext = Path(filename).suffix.lower()
+    if ext not in LOGBOOK_ALLOWED_EXTENSIONS:
+        raise ValueError("Format d'image non supporte.")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    slug = (secure_filename(Path(filename).stem) or "photo")[:20]
+    unique_id = uuid4().hex[:6]
+    final_name = f"journal-{timestamp}-{slug}-{unique_id}{ext}"
+    target = camera_manager.save_directory / final_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    file_obj.save(target)
+    return final_name
+
+
+def _serialize_log_entry(entry: Dict[str, object]) -> Dict[str, object]:
+    photos = []
+    for name in entry.get("photos") or []:
+        if not isinstance(name, str):
+            continue
+        photos.append(
+            {
+                "filename": name,
+                "url": url_for("camera_media", filename=name),
+                "thumbnail_url": url_for("camera_media", filename=name),
+            }
+        )
+    return {
+        "id": entry.get("id"),
+        "text": entry.get("text") or "",
+        "created_at": entry.get("created_at"),
+        "photos": photos,
+    }
 
 
 
@@ -694,6 +742,61 @@ def gallery_delete():
     deleted = camera_manager.delete_media(clean_names)
 
     return jsonify({"ok": True, "deleted": deleted})
+
+
+
+@app.get("/logbook/entries")
+def logbook_entries():
+    entries = _load_logbook_entries()
+    entries.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    payload = [_serialize_log_entry(entry) for entry in entries]
+    return jsonify({"ok": True, "entries": payload})
+
+
+@app.post("/logbook/entries")
+def logbook_add_entry():
+    text = (request.form.get("text") or "").strip()
+    photos: List[str] = []
+    files = request.files.getlist("photos")
+    if files and len(files) > MAX_LOGBOOK_PHOTOS:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"Maximum {MAX_LOGBOOK_PHOTOS} photos par entree.",
+                }
+            ),
+            400,
+        )
+    if not text and not any(file.filename for file in files):
+        return jsonify({"ok": False, "error": "Texte ou photo requis."}), 400
+    try:
+        for file_obj in files:
+            if not file_obj or not file_obj.filename:
+                continue
+            saved_name = _store_logbook_photo(file_obj)
+            photos.append(saved_name)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception("Sauvegarde photo journal impossible")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    entry = {
+        "id": uuid4().hex,
+        "text": text,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "photos": photos,
+    }
+    entries = _load_logbook_entries()
+    entries.append(entry)
+    entries.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    try:
+        _save_logbook_entries(entries)
+    except OSError as exc:
+        app.logger.error("Logbook save failed: %s", exc)
+        return jsonify({"ok": False, "error": "Sauvegarde du journal impossible."}), 500
+    return jsonify({"ok": True, "entry": _serialize_log_entry(entry)})
+
 
 
 

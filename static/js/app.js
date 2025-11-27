@@ -42,6 +42,8 @@ let mediaViewerEl = null;
 let mediaViewerContentEl = null;
 let cameraLiveImageEl = null;
 let cameraLiveOverlayEl = null;
+let logbookEntriesCache = [];
+let logbookEmptyText = "";
 const ANALYSIS_PERIOD_LABELS = {
   last_3_days: "0 à -3 jours",
   last_week: "-3 à -7 jours",
@@ -1324,6 +1326,9 @@ const clickHandlers = {
   cameraCapturePhoto: () => captureCameraPhoto(),
   cameraCaptureVideo: () => captureCameraVideo(),
   cameraChangeDevice: () => changeCameraDevice(),
+  logbookSubmit: () => submitLogbookEntry(),
+  logbookRefresh: () => loadLogbookEntries(),
+  logbookReset: () => resetLogbookForm(),
 };
 
 const changeHandlers = {
@@ -1871,6 +1876,229 @@ async function deleteGallerySelection(mediaType) {
   }
 }
 
+function setLogbookStatus(message = "", tone = "secondary") {
+  const statusEl = document.getElementById("logbookFormStatus");
+  if (!statusEl) return;
+  const classes = ["text-secondary", "text-success", "text-danger"];
+  classes.forEach((cls) => statusEl.classList.remove(cls));
+  let className = "text-secondary";
+  if (tone === "success") {
+    className = "text-success";
+  } else if (tone === "danger") {
+    className = "text-danger";
+  }
+  statusEl.classList.add(className);
+  statusEl.textContent = message || "";
+}
+
+function resetLogbookForm(clearStatus = true) {
+  const textArea = document.getElementById("logbookText");
+  if (textArea) {
+    textArea.value = "";
+  }
+  const photosInput = document.getElementById("logbookPhotos");
+  if (photosInput) {
+    photosInput.value = "";
+    updateLogbookSelectedFiles(photosInput);
+  }
+  if (clearStatus) {
+    setLogbookStatus("");
+  }
+}
+
+function updateLogbookSelectedFiles(inputEl) {
+  const input = inputEl || document.getElementById("logbookPhotos");
+  const container = document.getElementById("logbookSelectedFiles");
+  if (!input || !container) return;
+  container.innerHTML = "";
+  const files = Array.from(input.files || []);
+  if (!files.length) {
+    container.textContent = "";
+    return;
+  }
+  files.forEach((file) => {
+    const pill = document.createElement("span");
+    pill.className = "file-pill";
+    pill.textContent = file.name;
+    container.appendChild(pill);
+  });
+}
+
+async function submitLogbookEntry() {
+  const textArea = document.getElementById("logbookText");
+  const photosInput = document.getElementById("logbookPhotos");
+  if (!textArea || !photosInput) {
+    showToast("Formulaire journal indisponible.", "danger");
+    return;
+  }
+  const textValue = (textArea.value || "").trim();
+  const files = photosInput.files || [];
+  if (!textValue && files.length === 0) {
+    setLogbookStatus("Ajoutez du texte ou au moins une photo.", "danger");
+    return;
+  }
+  const submitBtn = document.querySelector('[data-action="logbookSubmit"]');
+  if (submitBtn) {
+    submitBtn.disabled = true;
+  }
+  setLogbookStatus("Enregistrement en cours...", "secondary");
+  const formData = new FormData();
+  formData.append("text", textValue);
+  Array.from(files).forEach((file) => formData.append("photos", file));
+  try {
+    const res = await fetch("/logbook/entries", {
+      method: "POST",
+      body: formData,
+    });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (err) {
+      console.error("submitLogbookEntry parse", err);
+    }
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    setLogbookStatus("Entree ajoutee.", "success");
+    showToast("Journal mis a jour.", "success");
+    resetLogbookForm(false);
+    await loadLogbookEntries(true);
+  } catch (err) {
+    console.error("submitLogbookEntry", err);
+    setLogbookStatus(`Erreur: ${err.message}`, "danger");
+    showToast(`Journal indisponible: ${err.message}`, "danger");
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+    }
+  }
+}
+
+async function loadLogbookEntries(showErrors = true) {
+  const list = document.getElementById("logbookEntriesList");
+  const loader = document.getElementById("logbookEntriesLoader");
+  const empty = document.getElementById("logbookEntriesEmpty");
+  if (!list) return;
+  if (loader) {
+    loader.classList.remove("d-none");
+  }
+  if (empty) {
+    empty.classList.add("d-none");
+  }
+  try {
+    const res = await fetch("/logbook/entries");
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    logbookEntriesCache = Array.isArray(data.entries) ? data.entries : [];
+    renderLogbookEntries(logbookEntriesCache);
+  } catch (err) {
+    console.error("loadLogbookEntries", err);
+    if (showErrors) {
+      showToast(`Journal indisponible: ${err.message}`, "danger");
+    }
+    if (empty) {
+      empty.textContent = `Impossible de charger le journal: ${err.message}`;
+      empty.classList.remove("d-none");
+    }
+  } finally {
+    if (loader) {
+      loader.classList.add("d-none");
+    }
+  }
+}
+
+function renderLogbookEntries(entries) {
+  const list = document.getElementById("logbookEntriesList");
+  const empty = document.getElementById("logbookEntriesEmpty");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!entries || entries.length === 0) {
+    if (empty) {
+      empty.textContent = logbookEmptyText || empty.textContent;
+      empty.classList.remove("d-none");
+    }
+    return;
+  }
+  if (empty) {
+    empty.textContent = logbookEmptyText || empty.textContent;
+    empty.classList.add("d-none");
+  }
+  entries.forEach((entry) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "logbook-entry";
+    const dateEl = document.createElement("div");
+    dateEl.className = "logbook-entry-date";
+    dateEl.textContent = formatLogbookDate(entry.created_at);
+    wrapper.appendChild(dateEl);
+    if (entry.text) {
+      const textEl = document.createElement("p");
+      textEl.className = "logbook-entry-text";
+      textEl.textContent = entry.text;
+      wrapper.appendChild(textEl);
+    }
+    if (Array.isArray(entry.photos) && entry.photos.length > 0) {
+      const photosWrapper = document.createElement("div");
+      photosWrapper.className = "logbook-entry-photos";
+      entry.photos.forEach((photo) => {
+        if (!photo || !photo.url) return;
+        const photoEl = document.createElement("div");
+        photoEl.className = "logbook-entry-photo";
+        photoEl.dataset.url = photo.url;
+        const img = document.createElement("img");
+        img.src = photo.thumbnail_url || photo.url;
+        img.alt = photo.filename || "Photo";
+        photoEl.appendChild(img);
+        photosWrapper.appendChild(photoEl);
+      });
+      wrapper.appendChild(photosWrapper);
+    }
+    list.appendChild(wrapper);
+  });
+}
+
+function formatLogbookDate(value) {
+  if (!value) return "Date inconnue";
+  try {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+    return date.toLocaleString();
+  } catch (err) {
+    return value;
+  }
+}
+
+function initLogbookModule() {
+  const photosInput = document.getElementById("logbookPhotos");
+  if (photosInput) {
+    photosInput.addEventListener("change", () =>
+      updateLogbookSelectedFiles(photosInput)
+    );
+    updateLogbookSelectedFiles(photosInput);
+  }
+  const empty = document.getElementById("logbookEntriesEmpty");
+  if (empty && !logbookEmptyText) {
+    logbookEmptyText = empty.textContent || "";
+  }
+  const list = document.getElementById("logbookEntriesList");
+  if (list) {
+    list.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      const photo = target.closest(".logbook-entry-photo");
+      if (!photo) return;
+      const url = photo.dataset.url;
+      if (url) {
+        openMediaViewer(url, "photos");
+      }
+    });
+  }
+  loadLogbookEntries(false);
+}
+
 function initMediaViewer() {
   mediaViewerEl = document.getElementById("mediaViewer");
   mediaViewerContentEl = document.getElementById("mediaViewerContent");
@@ -1927,6 +2155,7 @@ function init() {
   setupTabPersistence();
   initPopin();
   initCameraModule();
+  initLogbookModule();
   refreshPorts();
   refreshState();
   nextRefreshAt = Date.now() + refreshIntervalMs;
