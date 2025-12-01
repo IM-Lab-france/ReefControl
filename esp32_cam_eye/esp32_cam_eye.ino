@@ -61,6 +61,10 @@ DNSServer dnsServer;
 const byte DNS_PORT = 53;
 bool dnsRunning = false;
 
+const size_t MAX_REQUEST_BODY = 2048;
+String pendingRequestBody;
+bool pendingRequestBodyTruncated = false;
+
 struct WifiConfig
 {
   String ssid;
@@ -213,6 +217,64 @@ const char *httpMethodToString(HTTPMethod method)
   }
 }
 
+void resetPendingRequestBody()
+{
+  pendingRequestBody = "";
+  pendingRequestBodyTruncated = false;
+}
+
+void handleRawRequestBody()
+{
+  HTTPRaw &raw = server.raw();
+  if (raw.status == RAW_START)
+  {
+    resetPendingRequestBody();
+    int expected = server.clientContentLength();
+    if (expected > 0 && static_cast<size_t>(expected) < MAX_REQUEST_BODY)
+    {
+      pendingRequestBody.reserve(static_cast<size_t>(expected));
+    }
+    return;
+  }
+
+  if (raw.status != RAW_WRITE || raw.currentSize == 0)
+  {
+    if (raw.status == RAW_END && pendingRequestBodyTruncated)
+    {
+      Serial.println("[HTTP] Corps de requete tronque (taille depassee)");
+    }
+    return;
+  }
+
+  if (pendingRequestBody.length() >= MAX_REQUEST_BODY)
+  {
+    pendingRequestBodyTruncated = true;
+    return;
+  }
+
+  size_t remaining = MAX_REQUEST_BODY - pendingRequestBody.length();
+  size_t chunkSize = raw.currentSize;
+  if (chunkSize > remaining)
+  {
+    chunkSize = remaining;
+    pendingRequestBodyTruncated = true;
+  }
+  pendingRequestBody.concat(reinterpret_cast<const char *>(raw.buf), chunkSize);
+}
+
+String consumeRequestBody()
+{
+  if (server.hasArg("plain"))
+  {
+    String direct = server.arg("plain");
+    resetPendingRequestBody();
+    return direct;
+  }
+  String body = pendingRequestBody;
+  resetPendingRequestBody();
+  return body;
+}
+
 void logHttpRequest(const String &path)
 {
   WiFiClient client = server.client();
@@ -323,7 +385,7 @@ void initCamera()
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = imageSettings.framesize;
+  config.frame_size = FRAMESIZE_UXGA;
   config.jpeg_quality = 12;
   config.fb_count = 1;
   config.grab_mode = CAMERA_GRAB_LATEST;
@@ -580,19 +642,32 @@ void handleImagePage()
   html += "<label>Saturation: <span id='saturationValue'>" + String(imageSettings.saturation) + "</span></label>";
   html += "<input type='range' id='saturation' min='-2' max='2' value='" + String(imageSettings.saturation) + "' oninput=\"document.getElementById('saturationValue').textContent=this.value\">";
   html += "<label>Resolution</label><select id='framesize'>" + buildFrameOptionsHtml() + "</select>";
-  html += F("<button onclick=\"saveSettings()\">Appliquer</button><button style='background:#0b8457;margin-left:8px;' onclick=\"refreshPreview()\">Capture test</button><div id='status'></div><img id='preview' alt='Previsualisation' src=''/>\n<script>function saveSettings(){const body={brightness:parseInt(document.getElementById('brightness').value),contrast:parseInt(document.getElementById('contrast').value),saturation:parseInt(document.getElementById('saturation').value),framesize:document.getElementById('framesize').value};fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).then(()=>{document.getElementById('status').textContent='Reglages appliques';}).catch(()=>{document.getElementById('status').textContent='Erreur d\'enregistrement';});}\nfunction refreshPreview(){document.getElementById('preview').src='/capture?ts='+Date.now();}\n</script></body></html>");
+  html += F("<button onclick=\"saveSettings()\">Appliquer</button><button style='background:#0b8457;margin-left:8px;' onclick=\"refreshPreview()\">Capture test</button><div id='status'></div><img id='preview' alt='Previsualisation' src=''/>\n<script>function saveSettings(){const body={brightness:parseInt(document.getElementById('brightness').value),contrast:parseInt(document.getElementById('contrast').value),saturation:parseInt(document.getElementById('saturation').value),framesize:document.getElementById('framesize').value};fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).then(()=>{document.getElementById('status').textContent=\"Reglages appliques\";}).catch(()=>{document.getElementById('status').textContent=\"Erreur d'enregistrement\";});}\nfunction refreshPreview(){document.getElementById('preview').src='/capture?ts='+Date.now();}\n</script></body></html>");
   server.send(200, "text/html", html);
 }
 
 void handleCapture()
 {
   logHttpRequest(server.uri());
+
+  // Vider le buffer existant pour forcer une nouvelle capture
+  camera_fb_t *old_fb = esp_camera_fb_get();
+  if (old_fb)
+  {
+    esp_camera_fb_return(old_fb);
+  }
+
+  // Petite pause pour laisser le capteur se stabiliser
+  delay(100);
+
+  // Maintenant capturer une image fraîche
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb)
   {
     sendJsonError(500, "Capture echouee");
     return;
   }
+
   WiFiClient client = server.client();
   if (!client)
   {
@@ -600,10 +675,14 @@ void handleCapture()
     sendJsonError(500, "Client invalide");
     return;
   }
+
   client.print("HTTP/1.1 200 OK\r\n");
   client.print("Content-Type: image/jpeg\r\n");
   client.print("Content-Length: ");
   client.print(fb->len);
+  client.print("\r\nCache-Control: no-store, no-cache, must-revalidate\r\n");
+  client.print("Pragma: no-cache\r\n");
+  client.print("Expires: 0");
   client.print("\r\nConnection: close\r\n\r\n");
   client.write(fb->buf, fb->len);
   client.stop();
@@ -625,7 +704,7 @@ void handleApiSettingsGet()
 void handleApiSettingsPost()
 {
   logHttpRequest(server.uri());
-  String body = server.arg("plain");
+  String body = consumeRequestBody();
   if (body.length() == 0)
   {
     sendJsonError(400, "Payload vide");
@@ -667,7 +746,7 @@ void handleApiSettingsPost()
 void handleApiWifiPost()
 {
   logHttpRequest(server.uri());
-  String body = server.arg("plain");
+  String body = consumeRequestBody();
   if (body.length() == 0)
   {
     sendJsonError(400, "Payload vide");
@@ -713,8 +792,8 @@ void setupServer()
   server.on("/capture", HTTP_GET, handleCapture);
   server.on("/api/config/all", HTTP_GET, handleApiConfigAll);
   server.on("/api/settings", HTTP_GET, handleApiSettingsGet);
-  server.on("/api/settings", HTTP_POST, handleApiSettingsPost);
-  server.on("/api/wifi", HTTP_POST, handleApiWifiPost);
+  server.on("/api/settings", HTTP_POST, handleApiSettingsPost, handleRawRequestBody);
+  server.on("/api/wifi", HTTP_POST, handleApiWifiPost, handleRawRequestBody);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server demarre");
