@@ -2,9 +2,10 @@ import atexit
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, Iterable, List, Set
 from uuid import uuid4
 
+import requests
 from flask import (
     Flask,
     Response,
@@ -26,7 +27,12 @@ from analysis import (
     save_analysis_queries,
 )
 from controller import controller, list_serial_ports
-from camera_manager import CameraUnavailable, camera_manager
+from camera_manager import (
+    CAMERA_CONFIG_PATH,
+    PHOTO_EXTENSIONS,
+    CameraUnavailable,
+    camera_manager,
+)
 
 
 
@@ -36,8 +42,57 @@ BASE_DIR = Path(__file__).resolve().parent
 LOGBOOK_PATH = BASE_DIR / "logbook_entries.json"
 LOGBOOK_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_LOGBOOK_PHOTOS = 8
+PHOTO_LABELS_PATH = BASE_DIR / "photo_labels.json"
+DEFAULT_PHOTO_CATEGORIES = ["Plante", "Produit", "Poisson"]
 
 app = Flask(__name__)
+
+ESP32_CONFIG_KEY = "esp32_cam_url"
+ESP32_SETTINGS_TIMEOUT = 5
+ESP32_CAPTURE_TIMEOUT = 10
+
+
+def _load_camera_config_file() -> Dict[str, Any]:
+    if not CAMERA_CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(CAMERA_CONFIG_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        app.logger.warning("camera_config.json invalide, reinitialisation temporaire.")
+        return {}
+
+
+def _save_camera_config_file(data: Dict[str, Any]) -> None:
+    CAMERA_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _get_esp32_cam_url() -> str:
+    config = _load_camera_config_file()
+    return str(config.get(ESP32_CONFIG_KEY) or "").strip()
+
+
+def _set_esp32_cam_url(url: str) -> str:
+    config = _load_camera_config_file()
+    config[ESP32_CONFIG_KEY] = url
+    _save_camera_config_file(config)
+    return url
+
+
+def _require_esp32_url() -> str:
+    url = _get_esp32_cam_url()
+    if not url:
+        raise RuntimeError("ESP32_URL_NOT_SET")
+    return url
+
+
+def _build_esp32_url(path: str) -> str:
+    base = _require_esp32_url().rstrip("/")
+    segment = path.lstrip("/")
+    return f"{base}/{segment}"
+
+
+def _esp32_error(message: str, status: int = 502, code: str = "ESP32_UNREACHABLE"):
+    return jsonify({"ok": False, "error": message, "error_code": code}), status
 
 
 def _load_logbook_entries() -> List[Dict[str, object]]:
@@ -95,6 +150,106 @@ def _serialize_log_entry(entry: Dict[str, object]) -> Dict[str, object]:
         "created_at": entry.get("created_at"),
         "photos": photos,
     }
+
+
+def _normalize_photo_categories(candidates: Any) -> List[str]:
+    merged: List[str] = list(DEFAULT_PHOTO_CATEGORIES)
+    if isinstance(candidates, list):
+        merged.extend(str(item) for item in candidates)
+    seen: Set[str] = set()
+    normalized: List[str] = []
+    for name in merged:
+        clean = str(name or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        normalized.append(clean)
+        seen.add(key)
+    return normalized
+
+
+def _normalize_photo_labels(raw_labels: Any, categories: List[str]) -> Dict[str, List[str]]:
+    if not isinstance(raw_labels, dict):
+        return {}
+    normalized: Dict[str, List[str]] = {}
+    lookup = {cat.lower(): cat for cat in categories}
+    for filename, labels in raw_labels.items():
+        if not isinstance(filename, str):
+            continue
+        clean_name = filename.strip()
+        if not clean_name:
+            continue
+        if not isinstance(labels, list):
+            continue
+        cleaned: List[str] = []
+        seen: Set[str] = set()
+        for label in labels:
+            if not isinstance(label, str):
+                continue
+            clean_label = label.strip()
+            if not clean_label:
+                continue
+            key = clean_label.lower()
+            canonical = lookup.get(key)
+            if not canonical or key in seen:
+                continue
+            cleaned.append(canonical)
+            seen.add(key)
+        if cleaned:
+            normalized[clean_name] = cleaned
+    return normalized
+
+
+def _load_photo_label_data() -> Dict[str, Any]:
+    payload = {"categories": list(DEFAULT_PHOTO_CATEGORIES), "labels": {}}
+    if not PHOTO_LABELS_PATH.exists():
+        return payload
+    try:
+        data = json.loads(PHOTO_LABELS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        app.logger.warning("photo_labels.json invalide, retour aux valeurs par defaut.")
+        return payload
+    if not isinstance(data, dict):
+        return payload
+    categories = _normalize_photo_categories(data.get("categories"))
+    labels = _normalize_photo_labels(data.get("labels"), categories)
+    return {"categories": categories, "labels": labels}
+
+
+def _save_photo_label_data(data: Dict[str, Any]) -> None:
+    safe = {
+        "categories": list(data.get("categories", [])),
+        "labels": data.get("labels", {}),
+    }
+    PHOTO_LABELS_PATH.write_text(json.dumps(safe, indent=2), encoding="utf-8")
+
+
+def _ensure_photo_media_file(filename: str) -> str:
+    clean = str(filename or "").replace("\\", "/").strip()
+    if not clean:
+        raise ValueError("Nom de fichier requis.")
+    candidate = (camera_manager.save_directory / clean).resolve()
+    base = camera_manager.save_directory.resolve()
+    if not str(candidate).startswith(str(base)):
+        raise ValueError("Chemin de fichier invalide.")
+    if candidate.suffix.lower() not in PHOTO_EXTENSIONS:
+        raise ValueError("Seules les photos peuvent être etiquetees.")
+    if not candidate.exists():
+        raise FileNotFoundError(f"Fichier introuvable: {clean}")
+    return clean
+
+
+def _remove_photo_labels_for_files(filenames: Iterable[str]) -> None:
+    data = _load_photo_label_data()
+    removed = False
+    for name in filenames:
+        if name in data["labels"]:
+            data["labels"].pop(name, None)
+            removed = True
+    if removed:
+        _save_photo_label_data(data)
 
 
 
@@ -657,6 +812,207 @@ def camera_capture_video():
 
 
 
+@app.get("/esp32cam/config")
+
+def esp32cam_get_config():
+
+    return jsonify({"ok": True, "url": _get_esp32_cam_url()})
+
+
+
+@app.post("/esp32cam/config")
+
+def esp32cam_set_config():
+
+    payload = request.get_json(force=True) or {}
+
+    url = (payload.get("url") or "").strip()
+
+    if not url:
+
+        return (
+
+            jsonify(
+
+                {
+
+                    "ok": False,
+
+                    "error": "URL ESP32-CAM requise.",
+
+                    "error_code": "ESP32_URL_NOT_SET",
+
+                }
+
+            ),
+
+            400,
+
+        )
+
+    try:
+
+        saved = _set_esp32_cam_url(url)
+
+    except OSError as exc:
+
+        app.logger.exception("Impossible de sauvegarder la configuration ESP32-CAM")
+
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify({"ok": True, "url": saved})
+
+
+
+@app.get("/esp32cam/settings")
+
+def esp32cam_get_settings():
+
+    try:
+
+        target = _build_esp32_url("/api/settings")
+
+    except RuntimeError:
+
+        return _esp32_error("URL ESP32-CAM non definie.", 400, "ESP32_URL_NOT_SET")
+
+    try:
+
+        resp = requests.get(target, timeout=ESP32_SETTINGS_TIMEOUT)
+
+        resp.raise_for_status()
+
+        data = resp.json()
+
+    except requests.exceptions.RequestException as exc:
+
+        app.logger.warning("ESP32 settings unreachable: %s", exc)
+
+        return _esp32_error("ESP32-CAM injoignable.", 502, "ESP32_UNREACHABLE")
+
+    except ValueError:
+
+        return _esp32_error(
+
+            "Reponse JSON invalide de l'ESP32-CAM.",
+
+            502,
+
+            "ESP32_INVALID_RESPONSE",
+
+        )
+
+    return jsonify({"ok": True, "settings": data})
+
+
+
+@app.post("/esp32cam/settings")
+
+def esp32cam_update_settings():
+
+    payload = request.get_json(force=True) or {}
+
+    try:
+
+        target = _build_esp32_url("/api/settings")
+
+    except RuntimeError:
+
+        return _esp32_error("URL ESP32-CAM non definie.", 400, "ESP32_URL_NOT_SET")
+
+    try:
+
+        resp = requests.post(
+
+            target, json=payload, timeout=ESP32_SETTINGS_TIMEOUT
+
+        )
+
+        resp.raise_for_status()
+
+        data = resp.json()
+
+    except requests.exceptions.RequestException as exc:
+
+        app.logger.warning("ESP32 settings update failed: %s", exc)
+
+        return _esp32_error("ESP32-CAM injoignable.", 502, "ESP32_UNREACHABLE")
+
+    except ValueError:
+
+        return _esp32_error(
+
+            "Reponse JSON invalide de l'ESP32-CAM.",
+
+            502,
+
+            "ESP32_INVALID_RESPONSE",
+
+        )
+
+    return jsonify({"ok": True, "settings": data})
+
+
+
+@app.get("/esp32cam/capture")
+
+def esp32cam_capture():
+
+    try:
+
+        target = _build_esp32_url("/capture")
+
+    except RuntimeError:
+
+        return _esp32_error("URL ESP32-CAM non definie.", 400, "ESP32_URL_NOT_SET")
+
+    try:
+
+        resp = requests.get(target, timeout=ESP32_CAPTURE_TIMEOUT, stream=True)
+
+        resp.raise_for_status()
+
+    except requests.exceptions.RequestException as exc:
+
+        app.logger.warning("ESP32 capture failed: %s", exc)
+
+        return _esp32_error("ESP32-CAM injoignable.", 502, "ESP32_UNREACHABLE")
+
+    content_type = resp.headers.get("Content-Type", "image/jpeg")
+
+    content_length = resp.headers.get("Content-Length")
+
+    def generate():
+
+        with resp:
+
+            for chunk in resp.iter_content(chunk_size=8192):
+
+                if chunk:
+
+                    yield chunk
+
+    headers = {}
+
+    if content_length:
+
+        headers["Content-Length"] = content_length
+
+    return Response(
+
+        stream_with_context(generate()),
+
+        content_type=content_type,
+
+        headers=headers,
+
+    )
+
+
+
+
+
+
 @app.get("/gallery/media")
 
 def gallery_media():
@@ -684,6 +1040,9 @@ def gallery_media():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
     items_payload = []
+    labels_map = {}
+    if media_type == "photos":
+        labels_map = _load_photo_label_data().get("labels", {})
 
     for item in listing["items"]:
 
@@ -691,19 +1050,20 @@ def gallery_media():
 
         thumb_name = item.get("thumbnail") or filename
 
-        items_payload.append(
+        payload = {
 
-            {
+            "filename": filename,
 
-                "filename": filename,
+            "url": url_for("camera_media", filename=filename),
 
-                "url": url_for("camera_media", filename=filename),
+            "thumbnail_url": url_for("camera_media", filename=thumb_name),
 
-                "thumbnail_url": url_for("camera_media", filename=thumb_name),
+        }
+        if media_type == "photos":
 
-            }
+            payload["labels"] = labels_map.get(filename, [])
 
-        )
+        items_payload.append(payload)
 
     return jsonify(
 
@@ -741,7 +1101,139 @@ def gallery_delete():
 
     deleted = camera_manager.delete_media(clean_names)
 
+    if deleted:
+
+        _remove_photo_labels_for_files(deleted)
+
     return jsonify({"ok": True, "deleted": deleted})
+
+
+
+@app.get("/gallery/labels")
+
+def gallery_get_labels():
+
+    data = _load_photo_label_data()
+
+    return jsonify(
+
+        {"ok": True, "categories": data["categories"], "labels": data["labels"]}
+
+    )
+
+
+
+@app.post("/gallery/categories")
+
+def gallery_add_category():
+
+    payload = request.get_json(force=True) or {}
+
+    name = str(payload.get("name") or "").strip()
+
+    if not name:
+
+        return jsonify({"ok": False, "error": "Nom de categorie requis."}), 400
+
+    data = _load_photo_label_data()
+
+    lower = name.lower()
+
+    if any(cat.lower() == lower for cat in data["categories"]):
+
+        return (
+
+            jsonify({"ok": False, "error": "Categorie deja existante."}),
+
+            400,
+
+        )
+
+    data["categories"].append(name)
+
+    data["categories"] = _normalize_photo_categories(data["categories"])
+
+    _save_photo_label_data(data)
+
+    return jsonify({"ok": True, "categories": data["categories"]})
+
+
+
+@app.post("/gallery/labels")
+
+def gallery_update_labels():
+
+    payload = request.get_json(force=True) or {}
+
+    filename_value = payload.get("filename")
+
+    try:
+
+        filename = _ensure_photo_media_file(filename_value)
+
+    except FileNotFoundError:
+
+        return (
+
+            jsonify({"ok": False, "error": "Fichier a etiqueter introuvable."}),
+
+            404,
+
+        )
+
+    except ValueError as exc:
+
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    labels_value = payload.get("labels") or []
+
+    if not isinstance(labels_value, list):
+
+        return jsonify({"ok": False, "error": "Labels invalides."}), 400
+
+    data = _load_photo_label_data()
+
+    lookup = {cat.lower(): cat for cat in data["categories"]}
+
+    cleaned: List[str] = []
+
+    seen: Set[str] = set()
+
+    for label in labels_value:
+
+        if not isinstance(label, str):
+
+            continue
+
+        clean_label = label.strip()
+
+        if not clean_label:
+
+            continue
+
+        key = clean_label.lower()
+
+        canonical = lookup.get(key)
+
+        if not canonical or key in seen:
+
+            continue
+
+        cleaned.append(canonical)
+
+        seen.add(key)
+
+    if cleaned:
+
+        data["labels"][filename] = cleaned
+
+    else:
+
+        data["labels"].pop(filename, None)
+
+    _save_photo_label_data(data)
+
+    return jsonify({"ok": True, "filename": filename, "labels": data["labels"].get(filename, [])})
 
 
 

@@ -7,5 +7,6 @@
   "brightness": 0.0,
   "contrast": 1.1,
   "saturation": 1.1,
-  "rotation": 90
+  "rotation": 90,
+  "esp32_cam_url": ""
 }

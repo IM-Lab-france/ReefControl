@@ -48,8 +48,8 @@
                     role="tab">🏠 Dashboard</button>
             </li>
             <li class="nav-item" role="presentation">
-                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-logbook" type="button"
-                    role="tab">📘 Journal</button>
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-logbook" type="button" role="tab">📘
+                    Journal</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-pumps" type="button" role="tab">💧
@@ -66,6 +66,10 @@
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-water" type="button" role="tab">🌊
                     Eau</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-water-analysis" type="button"
+                    role="tab">&#129514; Analyse de l'eau</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-feeder" type="button" role="tab">🐠
@@ -170,45 +174,20 @@
                         </div>
                     </div>
                     <div class="reef-card mt-3">
-                        <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                            <div class="fw-semibold mb-0">Analyse par Intelligence Artificielle</div>
-                            <div class="d-flex gap-2">
-                                <button class="btn btn-outline-light" data-action="prepareAiAnalysis" id="prepareAiBtn">
-                                    Préparer les données
-                                </button>
-                                <button class="btn btn-primary" data-action="get_ai_analysis" id="launchAiBtn" disabled>
-                                    <span class="spinner-border spinner-border-sm d-none" role="status"
-                                        aria-hidden="true" id="aiAnalysisSpinner"></span>
-                                    Interroger l'IA
-                                </button>
+                        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                            <div>
+                                <div class="fw-semibold mb-1">Analyse par Intelligence Artificielle</div>
+                                <small class="text-secondary">Retrouvez le module complet dans l'onglet <strong>Analyse
+                                        de l'eau</strong>.</small>
                             </div>
+                            <button class="btn btn-sm btn-aqua" type="button" data-bs-toggle="tab"
+                                data-bs-target="#tab-water-analysis">Ouvrir l'onglet</button>
                         </div>
-                        <div id="aiAnalysisResult" class="small text-secondary">
-                            Cliquez sur "Préparer les données" pour récupérer l'historique puis sur "Interroger l'IA"
-                            pour obtenir un diagnostic détaillé.
-                        </div>
-                        <div class="mt-2">
-                            <label class="form-label small" for="aiContextInput">Contexte additionnel pour l'analyse
-                                (optionnel)</label>
-                            <textarea id="aiContextInput" class="form-control form-control-sm" rows="3"
-                                placeholder="Ajoutez des observations récentes, changements effectués, etc."></textarea>
-                        </div>
-                        <details id="aiSummaryDetails" class="small text-secondary mt-2 d-none">
-                            <summary>Prévisualiser les données envoyées à l'IA</summary>
-                            <pre id="aiSummaryPreview" class="mt-2 mb-0"
-                                style="white-space: pre-wrap; word-wrap: break-word; max-height: 300px; overflow:auto;">
-                            </pre>
-                        </details>
-                        <details id="aiPromptDetails" class="small text-secondary mt-2 d-none">
-                            <summary>Afficher le prompt envoyé</summary>
-                            <pre id="aiPromptContent" class="mt-2 mb-0"
-                                style="white-space: pre-wrap; word-wrap: break-word;"></pre>
-                        </details>
                     </div>
                 </div>
             </div>
 
-                        <div class="tab-pane fade" id="tab-logbook" role="tabpanel">
+            <div class="tab-pane fade" id="tab-logbook" role="tabpanel">
                 <div class="row g-3">
                     <div class="col-lg-4">
                         <div class="reef-card h-100">
@@ -221,18 +200,24 @@
                             </div>
                             <div class="mb-3">
                                 <label class="form-label small" for="logbookText">Texte libre</label>
-                                <textarea id="logbookText" class="form-control form-control-sm logbook-textarea" rows="8" placeholder="Observations, maintenance, evolution des coraux..."></textarea>
+                                <textarea id="logbookText" class="form-control form-control-sm logbook-textarea"
+                                    rows="8"
+                                    placeholder="Observations, maintenance, evolution des coraux..."></textarea>
                             </div>
                             <div class="mb-3">
                                 <label class="form-label small" for="logbookPhotos">Photos (optionnel)</label>
-                                <input type="file" id="logbookPhotos" class="form-control form-control-sm" multiple accept="image/*" />
-                                <div id="logbookSelectedFiles" class="logbook-selected-files small text-secondary mt-1"></div>
-                                <small class="text-secondary d-block mt-1">Les fichiers sont stockes dans la galerie camera avec horodatage.</small>
+                                <input type="file" id="logbookPhotos" class="form-control form-control-sm" multiple
+                                    accept="image/*" />
+                                <div id="logbookSelectedFiles" class="logbook-selected-files small text-secondary mt-1">
+                                </div>
+                                <small class="text-secondary d-block mt-1">Les fichiers sont stockes dans la galerie
+                                    camera avec horodatage.</small>
                             </div>
                             <div id="logbookFormStatus" class="small text-secondary mb-2"></div>
                             <div class="d-flex gap-2">
                                 <button class="btn btn-aqua flex-fill" data-action="logbookSubmit">Enregistrer</button>
-                                <button class="btn btn-outline-light" data-action="logbookRefresh" title="Recharger les entrees">Actualiser</button>
+                                <button class="btn btn-outline-light" data-action="logbookRefresh"
+                                    title="Recharger les entrees">Actualiser</button>
                             </div>
                         </div>
                     </div>
@@ -243,17 +228,19 @@
                                     <div class="fw-semibold mb-0">Journal de bord</div>
                                     <small class="text-secondary">Les dernieres entrees s'affichent en premier.</small>
                                 </div>
-                                <button class="btn btn-sm btn-outline-light" data-action="logbookRefresh">Actualiser</button>
+                                <button class="btn btn-sm btn-outline-light"
+                                    data-action="logbookRefresh">Actualiser</button>
                             </div>
                             <div id="logbookEntriesLoader" class="text-secondary small">Chargement du journal...</div>
-                            <div id="logbookEntriesEmpty" class="text-secondary small d-none">Aucune entree pour le moment.</div>
+                            <div id="logbookEntriesEmpty" class="text-secondary small d-none">Aucune entree pour le
+                                moment.</div>
                             <div id="logbookEntriesList" class="logbook-timeline"></div>
                         </div>
                     </div>
                 </div>
             </div>
 
-<div class="tab-pane fade" id="tab-pumps" role="tabpanel">
+            <div class="tab-pane fade" id="tab-pumps" role="tabpanel">
                 <div class="reef-card">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <div class="fw-semibold mb-0">⛲ Pompes péristaltiques</div>
@@ -380,8 +367,8 @@
                 </div>
                 <div class="reef-card mt-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
-                        <div class="fw-semibold">Historique pompes p�ristaltiques</div>
-                        <small class="text-secondary">7 derni�res actions par pompe</small>
+                        <div class="fw-semibold">Historique pompes péristaltiques</div>
+                        <small class="text-secondary">7 dernières actions par pompe</small>
                     </div>
                     <div class="table-responsive">
                         <table class="table table-sm table-striped align-middle mb-0">
@@ -394,7 +381,8 @@
                             </thead>
                             <tbody id="peristalticHistoryBody">
                                 <tr>
-                                    <td colspan="3" class="text-center text-secondary small">Aucune action p�ristaltique</td>
+                                    <td colspan="3" class="text-center text-secondary small">Aucune action péristaltique
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>
@@ -659,19 +647,24 @@
                     <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
                         <div>
                             <div class="fw-semibold">Caméra & surveillance</div>
-                            <p class="text-secondary small mb-0">Accès direct, programmation et historique des médias.</p>
+                            <p class="text-secondary small mb-0">Accès direct, programmation et historique des médias.
+                            </p>
                         </div>
-                        <span class="badge reef-badge bg-secondary-subtle text-uppercase" id="cameraStatusBadge">Caméra inconnue</span>
+                        <span class="badge reef-badge bg-secondary-subtle text-uppercase" id="cameraStatusBadge">Caméra
+                            inconnue</span>
                     </div>
                     <ul class="nav nav-tabs camera-subnav mt-3" role="tablist">
                         <li class="nav-item" role="presentation">
-                            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#camera-pane-live" type="button" role="tab">Direct</button>
+                            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#camera-pane-live"
+                                type="button" role="tab">Direct</button>
                         </li>
                         <li class="nav-item" role="presentation">
-                            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#camera-pane-photos" type="button" role="tab">Photos</button>
+                            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#camera-pane-photos"
+                                type="button" role="tab">Photos</button>
                         </li>
                         <li class="nav-item" role="presentation">
-                            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#camera-pane-videos" type="button" role="tab">Vidéos</button>
+                            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#camera-pane-videos"
+                                type="button" role="tab">Vidéos</button>
                         </li>
                     </ul>
                     <div class="tab-content mt-3">
@@ -679,47 +672,67 @@
                             <div class="row g-4">
                                 <div class="col-lg-7">
                                     <div class="camera-live-wrapper">
-                                        <img id="cameraLiveFeed" src="/camera_feed" alt="Flux caméra" class="camera-live-image" />
-                                        <div class="camera-live-overlay d-none" id="cameraFeedUnavailable">Caméra indisponible</div>
+                                        <img id="cameraLiveFeed" src="/camera_feed" alt="Flux caméra"
+                                            class="camera-live-image" />
+                                        <div class="camera-live-overlay d-none" id="cameraFeedUnavailable">Caméra
+                                            indisponible</div>
                                     </div>
                                 </div>
                                 <div class="col-lg-5">
                                     <div class="camera-card">
                                         <div class="section-title mb-2">Configuration rapide</div>
                                         <div class="mb-3">
-                                            <label class="form-label small" for="cameraDeviceSelect">Caméra active</label>
+                                            <label class="form-label small" for="cameraDeviceSelect">Caméra
+                                                active</label>
                                             <div class="input-group input-group-sm">
-                                                <select id="cameraDeviceSelect" class="form-select form-select-sm"></select>
-                                                <button class="btn btn-outline-light" data-action="cameraChangeDevice">Basculer</button>
+                                                <select id="cameraDeviceSelect"
+                                                    class="form-select form-select-sm"></select>
+                                                <button class="btn btn-outline-light"
+                                                    data-action="cameraChangeDevice">Basculer</button>
                                             </div>
-                                            <small class="text-secondary d-block mt-1">La caméra sélectionnée est utilisée pour le direct et les captures.</small>
+                                            <small class="text-secondary d-block mt-1">La caméra sélectionnée est
+                                                utilisée pour le direct et les captures.</small>
                                         </div>
                                         <div class="form-check form-switch mb-2">
                                             <input class="form-check-input" type="checkbox" id="cameraHFlip" />
-                                            <label class="form-check-label small" for="cameraHFlip">Inversion horizontale</label>
+                                            <label class="form-check-label small" for="cameraHFlip">Inversion
+                                                horizontale</label>
                                         </div>
                                         <div class="form-check form-switch mb-3">
                                             <input class="form-check-input" type="checkbox" id="cameraVFlip" />
-                                            <label class="form-check-label small" for="cameraVFlip">Inversion verticale</label>
+                                            <label class="form-check-label small" for="cameraVFlip">Inversion
+                                                verticale</label>
                                         </div>
                                         <div class="row g-2 mb-3 camera-slider-group">
                                             <div class="col-4">
-                                                <label class="form-label small d-flex justify-content-between align-items-center" for="cameraBrightness">
-                                                    <span>Luminosité</span><span class="slider-value" id="cameraBrightnessValue">0.00</span>
+                                                <label
+                                                    class="form-label small d-flex justify-content-between align-items-center"
+                                                    for="cameraBrightness">
+                                                    <span>Luminosité</span><span class="slider-value"
+                                                        id="cameraBrightnessValue">0.00</span>
                                                 </label>
-                                                <input type="range" step="0.05" min="-1" max="1" class="form-range" id="cameraBrightness" />
+                                                <input type="range" step="0.05" min="-1" max="1" class="form-range"
+                                                    id="cameraBrightness" />
                                             </div>
                                             <div class="col-4">
-                                                <label class="form-label small d-flex justify-content-between align-items-center" for="cameraContrast">
-                                                    <span>Contraste</span><span class="slider-value" id="cameraContrastValue">1.00</span>
+                                                <label
+                                                    class="form-label small d-flex justify-content-between align-items-center"
+                                                    for="cameraContrast">
+                                                    <span>Contraste</span><span class="slider-value"
+                                                        id="cameraContrastValue">1.00</span>
                                                 </label>
-                                                <input type="range" step="0.05" min="0.1" max="4" class="form-range" id="cameraContrast" />
+                                                <input type="range" step="0.05" min="0.1" max="4" class="form-range"
+                                                    id="cameraContrast" />
                                             </div>
                                             <div class="col-4">
-                                                <label class="form-label small d-flex justify-content-between align-items-center" for="cameraSaturation">
-                                                    <span>Saturation</span><span class="slider-value" id="cameraSaturationValue">1.00</span>
+                                                <label
+                                                    class="form-label small d-flex justify-content-between align-items-center"
+                                                    for="cameraSaturation">
+                                                    <span>Saturation</span><span class="slider-value"
+                                                        id="cameraSaturationValue">1.00</span>
                                                 </label>
-                                                <input type="range" step="0.05" min="0.1" max="4" class="form-range" id="cameraSaturation" />
+                                                <input type="range" step="0.05" min="0.1" max="4" class="form-range"
+                                                    id="cameraSaturation" />
                                             </div>
                                         </div>
                                         <div class="mb-3">
@@ -731,20 +744,28 @@
                                             </select>
                                         </div>
                                         <label class="form-label small" for="cameraAutoTime">Heure capture auto</label>
-                                        <input type="time" class="form-control form-control-sm mb-3" id="cameraAutoTime" />
-                                        <label class="form-label small" for="cameraSaveDirectory">Répertoire de sauvegarde</label>
-                                        <input type="text" class="form-control form-control-sm mb-3" id="cameraSaveDirectory" placeholder="/home/pi/camera_media" />
-                                        <button class="btn btn-sm btn-aqua w-100" data-action="cameraSaveSettings">Enregistrer</button>
+                                        <input type="time" class="form-control form-control-sm mb-3"
+                                            id="cameraAutoTime" />
+                                        <label class="form-label small" for="cameraSaveDirectory">Répertoire de
+                                            sauvegarde</label>
+                                        <input type="text" class="form-control form-control-sm mb-3"
+                                            id="cameraSaveDirectory" placeholder="/home/pi/camera_media" />
+                                        <button class="btn btn-sm btn-aqua w-100"
+                                            data-action="cameraSaveSettings">Enregistrer</button>
                                     </div>
                                     <div class="camera-card mt-3">
                                         <div class="section-title mb-2">Contrôle manuel</div>
-                                        <button class="btn btn-aqua w-100 mb-3" data-action="cameraCapturePhoto">Prendre une photo</button>
+                                        <button class="btn btn-aqua w-100 mb-3" data-action="cameraCapturePhoto">Prendre
+                                            une photo</button>
                                         <div class="input-group input-group-sm">
                                             <span class="input-group-text">Durée vidéo (s)</span>
-                                            <input type="number" class="form-control" id="cameraVideoDuration" min="1" value="10" />
-                                            <button class="btn btn-outline-light" data-action="cameraCaptureVideo">Enregistrer</button>
+                                            <input type="number" class="form-control" id="cameraVideoDuration" min="1"
+                                                value="10" />
+                                            <button class="btn btn-outline-light"
+                                                data-action="cameraCaptureVideo">Enregistrer</button>
                                         </div>
-                                        <small class="text-secondary d-block mt-2">Les captures sont stockées dans le dossier configuré puis visibles dans les galeries.</small>
+                                        <small class="text-secondary d-block mt-2">Les captures sont stockées dans le
+                                            dossier configuré puis visibles dans les galeries.</small>
                                     </div>
                                 </div>
                             </div>
@@ -760,17 +781,44 @@
                                 </div>
                                 <div class="col-sm-4">
                                     <div class="form-check mt-4 mt-sm-0">
-                                        <input class="form-check-input" type="checkbox" id="gallerySelectAll_photos" data-gallery-select-all="photos" />
-                                        <label class="form-check-label small" for="gallerySelectAll_photos">Tout sélectionner</label>
+                                        <input class="form-check-input" type="checkbox" id="gallerySelectAll_photos"
+                                            data-gallery-select-all="photos" />
+                                        <label class="form-check-label small" for="gallerySelectAll_photos">Tout
+                                            sélectionner</label>
                                     </div>
                                 </div>
                                 <div class="col-sm-4 text-sm-end">
-                                    <button class="btn btn-sm btn-outline-danger mt-3 mt-sm-0" data-gallery-delete="photos">Supprimer la sélection</button>
+                                    <button class="btn btn-sm btn-outline-danger mt-3 mt-sm-0"
+                                        data-gallery-delete="photos">Supprimer la sélection</button>
                                 </div>
+                            </div>
+                            <div class="camera-label-panel" id="photoCategoryPanel">
+                                <div class="d-flex flex-column flex-md-row gap-2 align-items-md-center">
+                                    <div class="flex-grow-1">
+                                        <label class="form-label small mb-1" for="photoCategoryList">Catégories
+                                            disponibles</label>
+                                        <div id="photoCategoryList"
+                                            class="d-flex flex-wrap gap-2 photo-category-badges"></div>
+                                    </div>
+                                    <div>
+                                        <button class="btn btn-sm btn-outline-primary" id="addPhotoCategoryBtn"
+                                            data-action="photoCategoryAdd">+ Catégorie</button>
+                                    </div>
+                                </div>
+                                <div class="input-group input-group-sm mt-2 d-none" id="photoCategoryInputGroup">
+                                    <input type="text" class="form-control" id="photoCategoryInput"
+                                        placeholder="Nom de la catégorie" maxlength="32" />
+                                    <button class="btn btn-aqua" data-action="photoCategorySave">Ajouter</button>
+                                    <button class="btn btn-outline-light"
+                                        data-action="photoCategoryCancel">Annuler</button>
+                                </div>
+                                <small class="text-secondary d-block mt-2">Cliquez sur les étiquettes situées sous une
+                                    photo pour l'associer à une catégorie.</small>
                             </div>
                             <div class="camera-gallery-grid" id="galleryGrid_photos"></div>
                             <div class="camera-gallery-pagination">
-                                <button class="btn btn-outline-light btn-sm" data-gallery-prev="photos">Précédent</button>
+                                <button class="btn btn-outline-light btn-sm"
+                                    data-gallery-prev="photos">Précédent</button>
                                 <span class="small text-secondary" id="galleryPageIndicator_photos">Page 1 sur 1</span>
                                 <button class="btn btn-outline-light btn-sm" data-gallery-next="photos">Suivant</button>
                             </div>
@@ -786,23 +834,98 @@
                                 </div>
                                 <div class="col-sm-4">
                                     <div class="form-check mt-4 mt-sm-0">
-                                        <input class="form-check-input" type="checkbox" id="gallerySelectAll_videos" data-gallery-select-all="videos" />
-                                        <label class="form-check-label small" for="gallerySelectAll_videos">Tout sélectionner</label>
+                                        <input class="form-check-input" type="checkbox" id="gallerySelectAll_videos"
+                                            data-gallery-select-all="videos" />
+                                        <label class="form-check-label small" for="gallerySelectAll_videos">Tout
+                                            sélectionner</label>
                                     </div>
                                 </div>
                                 <div class="col-sm-4 text-sm-end">
-                                    <button class="btn btn-sm btn-outline-danger mt-3 mt-sm-0" data-gallery-delete="videos">Supprimer la sélection</button>
+                                    <button class="btn btn-sm btn-outline-danger mt-3 mt-sm-0"
+                                        data-gallery-delete="videos">Supprimer la sélection</button>
                                 </div>
                             </div>
                             <div class="camera-gallery-grid" id="galleryGrid_videos"></div>
                             <div class="camera-gallery-pagination">
-                                <button class="btn btn-outline-light btn-sm" data-gallery-prev="videos">Précédent</button>
+                                <button class="btn btn-outline-light btn-sm"
+                                    data-gallery-prev="videos">Précédent</button>
                                 <span class="small text-secondary" id="galleryPageIndicator_videos">Page 1 sur 1</span>
                                 <button class="btn btn-outline-light btn-sm" data-gallery-next="videos">Suivant</button>
                             </div>
                         </div>
                     </div>
                 </div>
+                <div class="reef-card mt-4" id="esp32CamCard">
+                    <!-- ESP32-CAM support -->
+                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold mb-0">ESP32-CAM distante</div>
+                            <small class="text-secondary">Configurez l'oeil reseau et declenchez des captures.</small>
+                        </div>
+                        <span id="esp32CamStatusBadge" class="badge reef-badge bg-secondary-subtle text-uppercase">En
+                            attente</span>
+                    </div>
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-md-8">
+                            <label class="form-label small" for="esp32CamUrlInput">URL de base</label>
+                            <input type="text" id="esp32CamUrlInput" class="form-control form-control-sm"
+                                placeholder="http://192.168.4.1" />
+                        </div>
+                        <div class="col-md-4 d-grid">
+                            <button class="btn btn-aqua" data-action="esp32camSaveConfig">Enregistrer l'URL</button>
+                        </div>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <button class="btn btn-outline-light btn-sm" data-action="esp32camRefreshSettings">Actualiser
+                            les reglages</button>
+                        <button class="btn btn-outline-primary btn-sm" data-action="esp32camApplySettings">Appliquer les
+                            reglages</button>
+                    </div>
+                    <div class="row g-3 align-items-start">
+                        <div class="col-lg-8">
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small d-flex justify-content-between align-items-center"
+                                        for="esp32CamBrightness">
+                                        <span>Luminosite</span><span id="esp32CamBrightnessValue">0</span>
+                                    </label>
+                                    <input type="range" id="esp32CamBrightness" min="-2" max="2" step="1"
+                                        class="form-range" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small d-flex justify-content-between align-items-center"
+                                        for="esp32CamContrast">
+                                        <span>Contraste</span><span id="esp32CamContrastValue">0</span>
+                                    </label>
+                                    <input type="range" id="esp32CamContrast" min="-2" max="2" step="1"
+                                        class="form-range" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small d-flex justify-content-between align-items-center"
+                                        for="esp32CamSaturation">
+                                        <span>Saturation</span><span id="esp32CamSaturationValue">0</span>
+                                    </label>
+                                    <input type="range" id="esp32CamSaturation" min="-2" max="2" step="1"
+                                        class="form-range" />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-4">
+                            <label class="form-label small" for="esp32CamFramesize">Resolution</label>
+                            <select id="esp32CamFramesize" class="form-select form-select-sm mb-3">
+                                <option value="QVGA">QVGA</option>
+                                <option value="VGA">VGA</option>
+                                <option value="SVGA">SVGA</option>
+                                <option value="XGA">XGA</option>
+                                <option value="UXGA" selected="selected">UXGA</option>
+                            </select>
+                            <button class="btn btn-sm btn-aqua w-100 mb-2" data-action="esp32camCapture">Prendre une
+                                photo (ESP32-CAM)</button>
+                            <img id="esp32CamPreview" class="img-fluid rounded border d-none" alt="Capture ESP32-CAM" />
+                        </div>
+                    </div>
+                </div>
+
             </div>
             <div class="tab-pane fade" id="tab-config" role="tabpanel">
                 <div class="reef-card mt-3">
@@ -899,6 +1022,46 @@
                         quelques secondes pendant l'opération.
                     </p>
                     <button class="btn btn-danger" data-action="restartService">Redémarrer le service Reef</button>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="tab-water-analysis" role="tabpanel">
+                <!-- Onglet Analyse de l'eau -->
+                <div class="reef-card">
+                    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                        <div class="fw-semibold mb-0">Analyse par Intelligence Artificielle</div>
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-outline-light" data-action="prepareAiAnalysis" id="prepareAiBtn">
+                                Preparer les donnees
+                            </button>
+                            <button class="btn btn-primary" data-action="get_ai_analysis" id="launchAiBtn" disabled>
+                                <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"
+                                    id="aiAnalysisSpinner"></span>
+                                Interroger l'IA
+                            </button>
+                        </div>
+                    </div>
+                    <div id="aiAnalysisResult" class="small text-secondary">
+                        Cliquez sur "Preparer les donnees" pour recuperer l'historique puis sur "Interroger l'IA"
+                        pour obtenir un diagnostic detaille.
+                    </div>
+                    <div class="mt-2">
+                        <label class="form-label small" for="aiContextInput">Contexte additionnel pour l'analyse
+                            (optionnel)</label>
+                        <textarea id="aiContextInput" class="form-control form-control-sm" rows="3"
+                            placeholder="Ajoutez des observations recentes, changements effectues, etc."></textarea>
+                    </div>
+                    <details id="aiSummaryDetails" class="small text-secondary mt-2 d-none">
+                        <summary>Previsualiser les donnees envoyees a l'IA</summary>
+                        <pre id="aiSummaryPreview" class="mt-2 mb-0"
+                            style="white-space: pre-wrap; word-wrap: break-word; max-height: 300px; overflow:auto;">
+                        </pre>
+                    </details>
+                    <details id="aiPromptDetails" class="small text-secondary mt-2 d-none">
+                        <summary>Afficher le prompt envoye</summary>
+                        <pre id="aiPromptContent" class="mt-2 mb-0"
+                            style="white-space: pre-wrap; word-wrap: break-word;"></pre>
+                    </details>
                 </div>
             </div>
 

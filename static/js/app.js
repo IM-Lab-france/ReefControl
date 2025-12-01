@@ -44,6 +44,17 @@ let cameraLiveImageEl = null;
 let cameraLiveOverlayEl = null;
 let logbookEntriesCache = [];
 let logbookEmptyText = "";
+let esp32CamConfig = { url: "" };
+let esp32CamSettings = null;
+let esp32CamPreviewUrl = null;
+let esp32CamCapturePending = false;
+const DEFAULT_PHOTO_LABEL_CATEGORIES = ["Plante", "Produit", "Poisson"];
+const photoLabelsState = {
+  categories: [...DEFAULT_PHOTO_LABEL_CATEGORIES],
+  labels: {},
+  loaded: false,
+  loadingPromise: null,
+};
 const ANALYSIS_PERIOD_LABELS = {
   last_3_days: "0 à -3 jours",
   last_week: "-3 à -7 jours",
@@ -1326,9 +1337,16 @@ const clickHandlers = {
   cameraCapturePhoto: () => captureCameraPhoto(),
   cameraCaptureVideo: () => captureCameraVideo(),
   cameraChangeDevice: () => changeCameraDevice(),
+  esp32camSaveConfig: () => saveEsp32CamConfig(),
+  esp32camRefreshSettings: () => refreshEsp32CamSettings(),
+  esp32camApplySettings: () => applyEsp32CamSettings(),
+  esp32camCapture: () => captureEsp32CamPhoto(),
   logbookSubmit: () => submitLogbookEntry(),
   logbookRefresh: () => loadLogbookEntries(),
   logbookReset: () => resetLogbookForm(),
+  photoCategoryAdd: () => showPhotoCategoryInput(),
+  photoCategoryCancel: () => hidePhotoCategoryInput(),
+  photoCategorySave: (el) => submitPhotoCategory(el),
 };
 
 const changeHandlers = {
@@ -1417,7 +1435,7 @@ async function loadCameraSettings() {
     }
     const data = await res.json();
     if (!data.ok) {
-      throw new Error(data.error || "Réponse invalide");
+      throw new Error(data.error || "Reponse invalide");
     }
     cameraSettings = data.settings || {};
     applyCameraSettingsToUI(cameraSettings);
@@ -1570,6 +1588,15 @@ function initCameraModule() {
       updateCameraSliderDisplay(id);
     }
   });
+  ["esp32CamBrightness", "esp32CamContrast", "esp32CamSaturation"].forEach(
+    (id) => {
+      const input = document.getElementById(id);
+      if (input) {
+        input.addEventListener("input", () => updateEsp32SliderDisplay(id));
+        updateEsp32SliderDisplay(id);
+      }
+    }
+  );
   if (cameraLiveImageEl) {
     cameraLiveImageEl.addEventListener("error", () => handleCameraFeedState(false));
     cameraLiveImageEl.addEventListener("load", () =>
@@ -1578,6 +1605,8 @@ function initCameraModule() {
   }
   initMediaViewer();
   loadCameraSettings();
+  loadEsp32CamConfig();
+  initPhotoCategoryInput();
   ["photos", "videos"].forEach((mediaType) => {
     const sortSelect = document.querySelector(
       `[data-gallery-sort="${mediaType}"]`
@@ -1714,6 +1743,541 @@ async function changeCameraDevice() {
   }
 }
 
+// --- ESP32-CAM support ---
+function setEsp32Status(message, tone = "secondary") {
+  const badge = document.getElementById("esp32CamStatusBadge");
+  if (!badge) return;
+  const tones = ["bg-success", "bg-danger", "bg-warning", "bg-info", "bg-secondary-subtle"];
+  tones.forEach((cls) => badge.classList.remove(cls));
+  const toneClass =
+    {
+      success: "bg-success",
+      danger: "bg-danger",
+      warning: "bg-warning",
+      info: "bg-info",
+      secondary: "bg-secondary-subtle",
+    }[tone] || "bg-secondary-subtle";
+  badge.classList.add(toneClass);
+  badge.textContent = message;
+}
+
+function ensureEsp32Configured(showAlert = true) {
+  if (esp32CamConfig.url) {
+    return true;
+  }
+  if (showAlert) {
+    showToast("Configurez l'URL de l'ESP32-CAM avant d'utiliser ces actions.", "warning");
+  }
+  setEsp32Status("URL requise", "warning");
+  return false;
+}
+
+function updateEsp32SliderDisplay(id) {
+  const input = document.getElementById(id);
+  const valueEl = document.getElementById(`${id}Value`);
+  if (input && valueEl) {
+    valueEl.textContent = input.value;
+  }
+}
+
+function setEsp32SliderValue(id, value) {
+  const input = document.getElementById(id);
+  if (!input) return;
+  const numericValue =
+    typeof value === "number" ? value : parseInt(value, 10);
+  const safeValue = Number.isFinite(numericValue) ? numericValue : 0;
+  input.value = String(safeValue);
+  updateEsp32SliderDisplay(id);
+}
+
+function updateEsp32Preview(blob) {
+  const img = document.getElementById("esp32CamPreview");
+  if (!img) return;
+  if (esp32CamPreviewUrl) {
+    URL.revokeObjectURL(esp32CamPreviewUrl);
+    esp32CamPreviewUrl = null;
+  }
+  if (!blob) {
+    img.src = "";
+    img.classList.add("d-none");
+    img.removeAttribute("data-loaded");
+    return;
+  }
+  const objectUrl = URL.createObjectURL(blob);
+  esp32CamPreviewUrl = objectUrl;
+  img.classList.add("d-none");
+  img.onload = () => {
+    img.classList.remove("d-none");
+    img.setAttribute("data-loaded", "1");
+  };
+  img.onerror = () => {
+    img.classList.add("d-none");
+    img.removeAttribute("data-loaded");
+  };
+  img.src = objectUrl;
+}
+
+async function loadEsp32CamConfig() {
+  const input = document.getElementById("esp32CamUrlInput");
+  if (!input) return;
+  try {
+    const res = await fetch("/esp32cam/config");
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    esp32CamConfig.url = data.url || "";
+    input.value = esp32CamConfig.url;
+    if (esp32CamConfig.url) {
+      setEsp32Status("Configuration OK", "info");
+      await refreshEsp32CamSettings({ silent: true });
+    } else {
+      setEsp32Status("URL requise", "warning");
+    }
+  } catch (err) {
+    console.error("loadEsp32CamConfig", err);
+    setEsp32Status("Erreur config", "danger");
+    showToast(`ESP32-CAM: ${err.message}`, "danger");
+  }
+}
+
+async function saveEsp32CamConfig() {
+  const input = document.getElementById("esp32CamUrlInput");
+  if (!input) return;
+  const url = (input.value || "").trim();
+  if (!url) {
+    showToast("Entrez l'URL de l'ESP32-CAM.", "warning");
+    setEsp32Status("URL requise", "warning");
+    return;
+  }
+  try {
+    const res = await fetch("/esp32cam/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    esp32CamConfig.url = data.url || "";
+    showToast("URL ESP32-CAM enregistrée.", "success");
+    await refreshEsp32CamSettings({ silent: false });
+  } catch (err) {
+    console.error("saveEsp32CamConfig", err);
+    showToast(`Impossible d'enregistrer l'ESP32-CAM: ${err.message}`, "danger");
+    setEsp32Status("Erreur enregistrement", "danger");
+  }
+}
+
+async function refreshEsp32CamSettings(options = {}) {
+  const { silent = false } = options;
+  if (!ensureEsp32Configured(!silent)) {
+    return;
+  }
+  setEsp32Status("Connexion...", "info");
+  try {
+    const res = await fetch("/esp32cam/settings");
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    esp32CamSettings = data.settings || data;
+    applyEsp32SettingsToUI(esp32CamSettings);
+    setEsp32Status("Connecté", "success");
+    if (!silent) {
+      showToast("Réglages ESP32-CAM chargés.", "success");
+    }
+  } catch (err) {
+    console.error("refreshEsp32CamSettings", err);
+    setEsp32Status("Injoignable", "danger");
+    if (!silent) {
+      showToast(`ESP32-CAM indisponible: ${err.message}`, "danger");
+    }
+  }
+}
+
+function applyEsp32SettingsToUI(settings = {}) {
+  setEsp32SliderValue(
+    "esp32CamBrightness",
+    typeof settings.brightness === "number" ? settings.brightness : 0
+  );
+  setEsp32SliderValue(
+    "esp32CamContrast",
+    typeof settings.contrast === "number" ? settings.contrast : 0
+  );
+  setEsp32SliderValue(
+    "esp32CamSaturation",
+    typeof settings.saturation === "number" ? settings.saturation : 0
+  );
+  const frameSelect = document.getElementById("esp32CamFramesize");
+  if (frameSelect && !frameSelect.matches(":focus")) {
+    const value = settings.framesize || settings.frame_size || "SVGA";
+    frameSelect.value = value;
+  }
+}
+
+function collectEsp32SettingsPayload() {
+  const payload = {};
+  ["Brightness", "Contrast", "Saturation"].forEach((key) => {
+    const input = document.getElementById(`esp32Cam${key}`);
+    if (input) {
+      const parsed = parseInt(input.value, 10);
+      payload[key.toLowerCase()] = Number.isFinite(parsed) ? parsed : 0;
+    }
+  });
+  const frameSelect = document.getElementById("esp32CamFramesize");
+  if (frameSelect) {
+    payload.framesize = frameSelect.value;
+  }
+  return payload;
+}
+
+async function applyEsp32CamSettings() {
+  if (!ensureEsp32Configured(true)) return;
+  const payload = collectEsp32SettingsPayload();
+  setEsp32Status("Application...", "info");
+  try {
+    const res = await fetch("/esp32cam/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    esp32CamSettings = data.settings || data;
+    applyEsp32SettingsToUI(esp32CamSettings);
+    setEsp32Status("Réglages appliqués", "success");
+    showToast("Réglages ESP32-CAM sauvegardés.", "success");
+  } catch (err) {
+    console.error("applyEsp32CamSettings", err);
+    setEsp32Status("Erreur réglages", "danger");
+    showToast(`Impossible d'appliquer les réglages ESP32-CAM: ${err.message}`, "danger");
+  }
+}
+
+async function captureEsp32CamPhoto() {
+  if (esp32CamCapturePending) {
+    return;
+  }
+  if (!ensureEsp32Configured(true)) return;
+  const captureBtn = document.querySelector('[data-action="esp32camCapture"]');
+  if (captureBtn) {
+    captureBtn.disabled = true;
+  }
+  esp32CamCapturePending = true;
+  setEsp32Status("Capture en cours...", "info");
+  try {
+    const res = await fetch(`/esp32cam/capture?ts=${Date.now()}`, {
+      cache: "no-store",
+    });
+    const contentType = res.headers.get("Content-Type") || "";
+    if (!res.ok) {
+      let errMsg = `HTTP ${res.status}`;
+      if (contentType.includes("application/json")) {
+        try {
+          const errData = await res.json();
+          errMsg = errData.error || errMsg;
+        } catch (parseErr) {
+          console.error("captureEsp32CamPhoto parse", parseErr);
+        }
+      }
+      throw new Error(errMsg);
+    }
+    if (contentType.includes("application/json")) {
+      const errData = await res.json();
+      throw new Error(errData.error || "Reponse inattendue de l'ESP32-CAM.");
+    }
+    const blob = await res.blob();
+    updateEsp32Preview(blob);
+    setEsp32Status("Capture OK", "success");
+    showToast("Photo ESP32-CAM reçue.", "success");
+  } catch (err) {
+    console.error("captureEsp32CamPhoto", err);
+    updateEsp32Preview(null);
+    setEsp32Status("Capture impossible", "danger");
+    showToast(`Capture ESP32-CAM impossible: ${err.message}`, "danger");
+  } finally {
+    esp32CamCapturePending = false;
+    if (captureBtn) {
+      captureBtn.disabled = false;
+    }
+  }
+}
+
+async function loadPhotoLabelData(options = {}) {
+  const { force = false, silent = false } = options;
+  if (!force && photoLabelsState.loaded && !photoLabelsState.loadingPromise) {
+    return photoLabelsState;
+  }
+  if (photoLabelsState.loadingPromise) {
+    try {
+      await photoLabelsState.loadingPromise;
+      if (!force) {
+        return photoLabelsState;
+      }
+    } catch (_err) {
+      if (!force) {
+        throw _err;
+      }
+    }
+  }
+  const loader = (async () => {
+    try {
+      const res = await fetch("/gallery/labels");
+      const data = await res.json();
+      if (!res.ok || data.ok === false) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      const categories = Array.isArray(data.categories) ? data.categories.slice() : [];
+      photoLabelsState.categories =
+        categories.length > 0 ? categories : [...DEFAULT_PHOTO_LABEL_CATEGORIES];
+      const labels = data.labels && typeof data.labels === "object" ? data.labels : {};
+      photoLabelsState.labels = labels;
+      photoLabelsState.loaded = true;
+      renderPhotoCategoryBadges();
+      return photoLabelsState;
+    } catch (err) {
+      photoLabelsState.loaded = false;
+      if (!silent) {
+        showToast(
+          `Impossible de charger les catégories photos: ${err.message}`,
+          "danger"
+        );
+      }
+      throw err;
+    } finally {
+      photoLabelsState.loadingPromise = null;
+    }
+  })();
+  photoLabelsState.loadingPromise = loader;
+  return loader;
+}
+
+function renderPhotoCategoryBadges() {
+  const container = document.getElementById("photoCategoryList");
+  if (!container) return;
+  container.innerHTML = "";
+  const categories = photoLabelsState.categories || [];
+  if (!categories.length) {
+    const info = document.createElement("span");
+    info.className = "text-secondary small";
+    info.textContent = "Aucune catégorie disponible.";
+    container.appendChild(info);
+    return;
+  }
+  categories.forEach((category) => {
+    const pill = document.createElement("span");
+    pill.className = "photo-category-pill";
+    pill.textContent = category;
+    container.appendChild(pill);
+  });
+}
+
+function showPhotoCategoryInput() {
+  const group = document.getElementById("photoCategoryInputGroup");
+  const btn = document.getElementById("addPhotoCategoryBtn");
+  if (group) {
+    group.classList.remove("d-none");
+  }
+  if (btn) {
+    btn.classList.add("d-none");
+  }
+  const input = document.getElementById("photoCategoryInput");
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
+}
+
+function hidePhotoCategoryInput() {
+  const group = document.getElementById("photoCategoryInputGroup");
+  const btn = document.getElementById("addPhotoCategoryBtn");
+  if (group) {
+    group.classList.add("d-none");
+  }
+  if (btn) {
+    btn.classList.remove("d-none");
+  }
+  const input = document.getElementById("photoCategoryInput");
+  if (input) {
+    input.value = "";
+  }
+}
+
+async function submitPhotoCategory(triggerEl) {
+  const input = document.getElementById("photoCategoryInput");
+  if (!input) return;
+  const value = (input.value || "").trim();
+  if (!value) {
+    showToast("Entrez un nom de catégorie.", "warning");
+    input.focus();
+    return;
+  }
+  if (triggerEl) {
+    triggerEl.disabled = true;
+  }
+  try {
+    const res = await fetch("/gallery/categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: value }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    const categories = Array.isArray(data.categories) ? data.categories.slice() : [];
+    photoLabelsState.categories =
+      categories.length > 0 ? categories : [...DEFAULT_PHOTO_LABEL_CATEGORIES];
+    photoLabelsState.loaded = true;
+    renderPhotoCategoryBadges();
+    hidePhotoCategoryInput();
+    showToast("Catégorie ajoutée.", "success");
+    await loadGallery("photos");
+  } catch (err) {
+    console.error("submitPhotoCategory", err);
+    showToast(`Impossible d'ajouter la catégorie: ${err.message}`, "danger");
+  } finally {
+    if (triggerEl) {
+      triggerEl.disabled = false;
+    }
+  }
+}
+
+function initPhotoCategoryInput() {
+  const input = document.getElementById("photoCategoryInput");
+  if (input) {
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitPhotoCategory();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        hidePhotoCategoryInput();
+      }
+    });
+  }
+  renderPhotoCategoryBadges();
+}
+
+function setPhotoLabelsFor(filename, labels) {
+  if (!filename) return;
+  if (Array.isArray(labels) && labels.length) {
+    photoLabelsState.labels[filename] = labels.slice();
+  } else {
+    delete photoLabelsState.labels[filename];
+  }
+}
+
+function clearPhotoLabelsForFilenames(filenames = []) {
+  if (!Array.isArray(filenames)) return;
+  filenames.forEach((name) => {
+    if (name && photoLabelsState.labels[name]) {
+      delete photoLabelsState.labels[name];
+    }
+  });
+}
+
+function populatePhotoLabelButtons(container, filename) {
+  if (!container) return;
+  container.innerHTML = "";
+  const categories = photoLabelsState.categories || [];
+  if (!categories.length) {
+    const info = document.createElement("small");
+    info.className = "text-secondary";
+    info.textContent = "Ajoutez une catégorie pour commencer.";
+    container.appendChild(info);
+    return;
+  }
+  const assigned = new Set(photoLabelsState.labels[filename] || []);
+  categories.forEach((category) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "photo-label-btn" + (assigned.has(category) ? " active" : "");
+    btn.dataset.category = category;
+    btn.dataset.filename = filename;
+    btn.textContent = category;
+    container.appendChild(btn);
+  });
+}
+
+function updatePhotoLabelButtons(container, filename) {
+  if (!container) return;
+  const assigned = new Set(photoLabelsState.labels[filename] || []);
+  container.querySelectorAll(".photo-label-btn").forEach((btn) => {
+    const category = btn.dataset.category;
+    btn.classList.toggle("active", !!(category && assigned.has(category)));
+  });
+}
+
+function buildPhotoLabelSection(wrapper, filename) {
+  const section = document.createElement("div");
+  section.className = "photo-label-section";
+  const title = document.createElement("div");
+  title.className =
+    "text-secondary text-uppercase small mb-1 photo-label-section-title";
+  title.textContent = "Étiquettes";
+  section.appendChild(title);
+  const picker = document.createElement("div");
+  picker.className = "photo-label-picker";
+  picker.dataset.filename = filename;
+  section.appendChild(picker);
+  populatePhotoLabelButtons(picker, filename);
+  wrapper.appendChild(section);
+}
+
+function handlePhotoLabelButtonClick(buttonEl) {
+  const picker = buttonEl.closest(".photo-label-picker");
+  if (!picker || picker.dataset.saving === "1") {
+    return;
+  }
+  const filename = buttonEl.dataset.filename;
+  const category = buttonEl.dataset.category;
+  if (!filename || !category) {
+    return;
+  }
+  togglePhotoLabel(filename, category, picker);
+}
+
+async function togglePhotoLabel(filename, category, picker) {
+  const current = new Set(photoLabelsState.labels[filename] || []);
+  if (current.has(category)) {
+    current.delete(category);
+  } else {
+    current.add(category);
+  }
+  const nextLabels = Array.from(current);
+  picker.dataset.saving = "1";
+  picker.querySelectorAll(".photo-label-btn").forEach((btn) => {
+    btn.classList.add("saving");
+  });
+  try {
+    const res = await fetch("/gallery/labels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, labels: nextLabels }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    const confirmed = Array.isArray(data.labels) ? data.labels : [];
+    setPhotoLabelsFor(filename, confirmed);
+  } catch (err) {
+    console.error("togglePhotoLabel", err);
+    showToast(`Impossible d'actualiser les étiquettes: ${err.message}`, "danger");
+  } finally {
+    picker.dataset.saving = "0";
+    picker.querySelectorAll(".photo-label-btn").forEach((btn) => {
+      btn.classList.remove("saving");
+    });
+    updatePhotoLabelButtons(picker, filename);
+  }
+}
+
 async function loadGallery(mediaType, pageOverride, sortOverride) {
   const state = galleryState[mediaType];
   if (!state) return;
@@ -1728,6 +2292,13 @@ async function loadGallery(mediaType, pageOverride, sortOverride) {
   grid.innerHTML =
     '<div class="text-center text-secondary py-3">Chargement...</div>';
   try {
+    if (mediaType === "photos") {
+      try {
+        await loadPhotoLabelData({ silent: true });
+      } catch (err) {
+        console.error("loadPhotoLabelData", err);
+      }
+    }
     const params = new URLSearchParams({
       type: mediaType,
       page: String(state.page),
@@ -1771,6 +2342,9 @@ function renderGallery(mediaType, items) {
       mediaType === "videos" ? "is-video" : ""
     }`;
     const thumbUrl = item.thumbnail_url || item.url;
+    if (mediaType === "photos" && Array.isArray(item.labels)) {
+      setPhotoLabelsFor(item.filename, item.labels);
+    }
     wrapper.innerHTML = `
       <div class="camera-gallery-thumb" data-media-url="${item.url}" data-media-type="${mediaType}">
         <img src="${thumbUrl}" alt="${item.filename}">
@@ -1792,6 +2366,9 @@ function renderGallery(mediaType, items) {
       </div>
     `;
     grid.appendChild(wrapper);
+    if (mediaType === "photos") {
+      buildPhotoLabelSection(wrapper, item.filename);
+    }
   });
 }
 
@@ -1827,6 +2404,14 @@ function toggleGallerySelectAll(mediaType, checked) {
 }
 
 function handleGalleryGridClick(mediaType, event) {
+  if (mediaType === "photos") {
+    const labelBtn = event.target.closest(".photo-label-btn");
+    if (labelBtn) {
+      event.preventDefault();
+      handlePhotoLabelButtonClick(labelBtn);
+      return;
+    }
+  }
   const checkbox = event.target.closest(".gallery-select");
   if (checkbox) {
     return;
@@ -1869,6 +2454,9 @@ async function deleteGallerySelection(mediaType) {
       throw new Error(data.error || `HTTP ${res.status}`);
     }
     showToast("Médias supprimés.", "success");
+    if (mediaType === "photos") {
+      clearPhotoLabelsForFilenames(filenames);
+    }
     await loadGallery(mediaType);
   } catch (err) {
     console.error("deleteGallerySelection", err);
@@ -2167,6 +2755,13 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+window.addEventListener("beforeunload", () => {
+  if (esp32CamPreviewUrl) {
+    URL.revokeObjectURL(esp32CamPreviewUrl);
+    esp32CamPreviewUrl = null;
+  }
+});
 
 function initPopin() {
   const popin = document.getElementById("reefPopin");

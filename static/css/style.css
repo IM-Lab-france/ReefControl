@@ -380,6 +380,35 @@ textarea.log-area {
     margin-top: 1.5rem;
 }
 
+.camera-label-panel {
+    background: rgba(4, 15, 23, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.85rem;
+    padding: 0.85rem;
+    margin-top: 1rem;
+}
+
+.photo-label-section {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    margin-top: 0.75rem;
+    padding-top: 0.6rem;
+}
+
+.photo-label-section-title {
+    letter-spacing: 0.08em;
+}
+
+.photo-category-badges .photo-category-pill {
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 0.15rem 0.55rem;
+    font-size: 0.68rem;
+    color: rgba(248, 249, 250, 0.8);
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    background: rgba(255, 255, 255, 0.05);
+}
+
 .camera-gallery-item {
     background: rgba(4, 15, 23, 0.9);
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -438,6 +467,36 @@ textarea.log-area {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.photo-label-picker {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.photo-label-btn {
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    background: transparent;
+    color: rgba(248, 249, 250, 0.75);
+    font-size: 0.65rem;
+    padding: 0.12rem 0.55rem;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.photo-label-btn.active {
+    background: rgba(13, 202, 240, 0.15);
+    border-color: rgba(13, 202, 240, 0.85);
+    color: #0dcaf0;
+}
+
+.photo-label-btn.saving {
+    opacity: 0.5;
+    pointer-events: none;
 }
 
 .gallery-badge {

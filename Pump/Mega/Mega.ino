@@ -8,7 +8,11 @@
     - HELLO?/STATUS? expose version info to allow a robust handshake
 */
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <ESP32Servo.h>
+#else
 #include <Servo.h>
+#endif
 #include <math.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
