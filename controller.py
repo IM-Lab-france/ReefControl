@@ -51,6 +51,11 @@ REQUEST_TIMEOUT = 3.0
 VALUES_LOG_PATH = BASE_DIR / "telemetry_values.log"
 EVENTS_LOG_PATH = BASE_DIR / "telemetry_events.log"
 INFLUX_LOG_PATH = BASE_DIR / "telemetry_influx.log"
+SERIAL_LOG_PATH = BASE_DIR / "telemetry_serial.log"
+PH_CALIBRATION_PATH = BASE_DIR / "ph_calibration.json"
+PH_CALIB_REFERENCES = {"4.01": 4.01, "6.86": 6.86, "9.18": 9.18}
+DEFAULT_PH_SLOPE = -1.0 / 0.18  # approx -5.5556 pH/V
+DEFAULT_PH_OFFSET = 7.0 + 2.5 / 0.18  # approx 20.8889 at 0 V
 PUMP_GPIO_PIN = 22
 FAN_GPIO_PIN = 23
 HEAT_GPIO_PIN = 24  # relais chauffe eau
@@ -104,6 +109,9 @@ telemetry_events_logger = _build_rotating_file_logger(
 )
 telemetry_influx_logger = _build_rotating_file_logger(
     "reef.telemetry.influx", INFLUX_LOG_PATH
+)
+serial_exchange_logger = _build_rotating_file_logger(
+    "reef.telemetry.serial", SERIAL_LOG_PATH
 )
 
 
@@ -284,6 +292,7 @@ class SerialClient:
             line = self._ser.readline().decode(errors="ignore").strip()
             if not line:
                 continue
+            serial_exchange_logger.info("<< %s", line)
             if predicate(line):
                 return line
             logger.debug("[HANDSHAKE] ignoring %s", line)
@@ -293,6 +302,7 @@ class SerialClient:
         if not self._ser:
             raise RuntimeError("Port fermé")
         payload = (command.strip() + "\r\n").encode()
+        serial_exchange_logger.info(">> %s", command.strip())
         self._ser.write(payload)
         self._ser.flush()
 
@@ -319,7 +329,11 @@ class SerialClient:
                 line = self._ser.readline()
                 if not line:
                     continue
-                self._line_handler(line.decode(errors="ignore").strip())
+                decoded = line.decode(errors="ignore").strip()
+                if not decoded:
+                    continue
+                serial_exchange_logger.info("<< %s", decoded)
+                self._line_handler(decoded)
             except Exception as exc:
                 logger.error("[SER] reader error: %s", exc)
                 self._stop.set()
@@ -389,7 +403,20 @@ class ReefController:
                 "E": {"time": None},
             },
             "light_lux": None,
+            "ph_calibration": {
+                "points": {},
+                "coefficients": {
+                    "slope": DEFAULT_PH_SLOPE,
+                    "offset": DEFAULT_PH_OFFSET,
+                },
+            },
         }
+        self.ph_calibration: Dict[str, Any] = {
+            "points": {},
+            "a": DEFAULT_PH_SLOPE,
+            "b": DEFAULT_PH_OFFSET,
+        }
+        self._load_ph_calibration()
         self._openai_api_key: Optional[str] = None
         self.global_speed = 400
         self.steps_per_job = 1000
@@ -2088,15 +2115,143 @@ class ReefController:
         except Exception:
             return fallback
 
+    def _ph_calibration_state(self) -> Dict[str, Any]:
+        points: Dict[str, Any] = {}
+        for key, meta in self.ph_calibration.get("points", {}).items():
+            if not isinstance(meta, dict):
+                continue
+            points[str(key)] = {
+                "ref": meta.get("ref"),
+                "voltage": meta.get("voltage"),
+                "updated_at": meta.get("updated_at"),
+            }
+        return {
+            "points": points,
+            "coefficients": {
+                "slope": self.ph_calibration.get("a", DEFAULT_PH_SLOPE),
+                "offset": self.ph_calibration.get("b", DEFAULT_PH_OFFSET),
+            },
+        }
+
+    def _sync_ph_calibration_state(self) -> None:
+        with self.state_lock:
+            self.state["ph_calibration"] = self._ph_calibration_state()
+
+    def _load_ph_calibration(self) -> None:
+        data: Dict[str, Any] = {}
+        if PH_CALIBRATION_PATH.exists():
+            try:
+                data = json.loads(PH_CALIBRATION_PATH.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Unable to load pH calibration: %s", exc)
+        points: Dict[str, Dict[str, Any]] = {}
+        for key, meta in (data.get("points") or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            try:
+                voltage = float(meta.get("voltage"))
+            except (TypeError, ValueError):
+                continue
+            ref_val = meta.get("ref", PH_CALIB_REFERENCES.get(str(key)))
+            try:
+                ref_val = float(ref_val)
+            except (TypeError, ValueError):
+                continue
+            ts = meta.get("updated_at")
+            try:
+                timestamp = float(ts) if ts is not None else None
+            except (TypeError, ValueError):
+                timestamp = None
+            points[str(key)] = {"ref": ref_val, "voltage": voltage, "updated_at": timestamp}
+        self.ph_calibration["points"] = points
+        try:
+            self.ph_calibration["a"] = float(data.get("a", self.ph_calibration["a"]))
+        except (TypeError, ValueError):
+            self.ph_calibration["a"] = DEFAULT_PH_SLOPE
+        try:
+            self.ph_calibration["b"] = float(data.get("b", self.ph_calibration["b"]))
+        except (TypeError, ValueError):
+            self.ph_calibration["b"] = DEFAULT_PH_OFFSET
+        self._sync_ph_calibration_state()
+
+    def _save_ph_calibration(self) -> None:
+        data = {
+            "points": self.ph_calibration.get("points", {}),
+            "a": self.ph_calibration.get("a", DEFAULT_PH_SLOPE),
+            "b": self.ph_calibration.get("b", DEFAULT_PH_OFFSET),
+        }
+        try:
+            PH_CALIBRATION_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.error("Unable to save pH calibration: %s", exc)
+
+    def _recompute_ph_calibration(self) -> None:
+        entries: list[tuple[float, float]] = []
+        for meta in self.ph_calibration.get("points", {}).values():
+            if not isinstance(meta, dict):
+                continue
+            try:
+                voltage = float(meta.get("voltage"))
+                ref_val = float(meta.get("ref"))
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(voltage) or math.isinf(voltage):
+                continue
+            entries.append((voltage, ref_val))
+        if len(entries) >= 2:
+            entries.sort(key=lambda item: item[0])
+            v_low, ref_low = entries[0]
+            v_high, ref_high = entries[-1]
+            if abs(v_high - v_low) > 1e-6:
+                slope = (ref_high - ref_low) / (v_high - v_low)
+                offset = ref_low - slope * v_low
+            else:
+                slope = DEFAULT_PH_SLOPE
+                offset = DEFAULT_PH_OFFSET
+        else:
+            slope = DEFAULT_PH_SLOPE
+            offset = DEFAULT_PH_OFFSET
+        self.ph_calibration["a"] = slope
+        self.ph_calibration["b"] = offset
+        self._sync_ph_calibration_state()
+
+    def calibrate_ph_reference(self, reference: str) -> Dict[str, Any]:
+        ref_key = str(reference or "").strip()
+        if ref_key not in PH_CALIB_REFERENCES:
+            raise ValueError("Reference pH inconnue.")
+        with self.state_lock:
+            current_voltage = self.state.get("ph_v")
+        if current_voltage is None:
+            raise RuntimeError("Tension pH indisponible.")
+        try:
+            voltage = float(current_voltage)
+        except (TypeError, ValueError):
+            raise RuntimeError("Tension pH invalide.")
+        entry = {
+            "ref": PH_CALIB_REFERENCES[ref_key],
+            "voltage": voltage,
+            "updated_at": time.time(),
+        }
+        self.ph_calibration.setdefault("points", {})[ref_key] = entry
+        self._recompute_ph_calibration()
+        self._save_ph_calibration()
+        with self.state_lock:
+            self.state["ph"] = self._ph_from_voltage(self.state.get("ph_v"))
+        return self._ph_calibration_state()
+
     def _ph_from_voltage(self, v: Optional[float]) -> Optional[float]:
-        """Approximate pH from PH-4502C voltage. Assumes 2.5 V at pH 7, ~0.18 V/pH."""
         if v is None:
             return None
         try:
             val = float(v)
             if math.isnan(val) or math.isinf(val):
                 return None
-            return round(7.0 + (2.5 - val) / 0.18, 2)
+            slope = self.ph_calibration.get("a", DEFAULT_PH_SLOPE)
+            offset = self.ph_calibration.get("b", DEFAULT_PH_OFFSET)
+            ph_value = slope * val + offset
+            if math.isnan(ph_value) or math.isinf(ph_value):
+                return None
+            return round(ph_value, 2)
         except Exception:
             return None
 

@@ -564,7 +564,8 @@
                         </div>
                         <div class="col-md-4">
                             <div class="alert alert-secondary small mb-0">
-                                PH-4502C branché sur T0 (A13). Thermistances : auxiliaire sur A12 (AUX-2). Températures
+                                PH-4502C branché sur AUX-2 (A9). Aucune thermistance analogique raccordée (uniquement
+                                sondes DS18B20 pour les températures).
                                 : eau X-MIN (D3), air X-MAX (D2), Y-Min (D14), Y-Max (D15).
                             </div>
                         </div>
@@ -929,6 +930,59 @@
             </div>
             <div class="tab-pane fade" id="tab-config" role="tabpanel">
                 <div class="reef-card mt-3">
+
+                    <div class="fw-semibold mb-2">🧪 Calibration sonde pH</div>
+
+                    <p class="small text-secondary mb-3">
+
+                        Plongez la sonde dans la solution tampon correspondante, attendez environ 30 secondes puis
+
+                        lancez la calibration. Les tensions mesurees mettront a jour automatiquement la pente et
+
+                        l'offset utilises pour le calcul du pH.
+
+                    </p>
+
+                    <div class="row g-3">
+
+                        <div class="col-md-4">
+
+                            <button class="btn btn-sm btn-outline-light w-100" data-action="phCalibrate"
+                                data-ref="4.01">Calibrer
+                                4.01</button>
+
+                            <div class="small text-secondary mt-1" id="phCalRef401Info">Pas encore calibre</div>
+
+                        </div>
+
+                        <div class="col-md-4">
+
+                            <button class="btn btn-sm btn-outline-light w-100" data-action="phCalibrate"
+                                data-ref="6.86">Calibrer
+                                6.86</button>
+
+                            <div class="small text-secondary mt-1" id="phCalRef686Info">Pas encore calibre</div>
+
+                        </div>
+
+                        <div class="col-md-4">
+
+                            <button class="btn btn-sm btn-outline-light w-100" data-action="phCalibrate"
+                                data-ref="9.18">Calibrer
+                                9.18</button>
+
+                            <div class="small text-secondary mt-1" id="phCalRef918Info">Pas encore calibre</div>
+
+                        </div>
+
+                    </div>
+
+                    <div class="small text-secondary mt-3" id="phCalSummary">Pente: -- pH/V | Offset: --</div>
+
+                </div>
+                <div class="reef-card mt-3">
+
+
                     <div class="fw-semibold mb-2">🏷️ Noms des sondes de température</div>
                     <div class="row g-2">
                         <div class="col-md-4">
@@ -1030,7 +1084,7 @@
                 <div class="reef-card">
                     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                         <div class="fw-semibold mb-0">Analyse par Intelligence Artificielle</div>
-                        <div class="d-flex gap-2">
+                        <div class="d-flex gap-2 flex-wrap">
                             <button class="btn btn-outline-light" data-action="prepareAiAnalysis" id="prepareAiBtn">
                                 Preparer les donnees
                             </button>
@@ -1062,6 +1116,161 @@
                         <pre id="aiPromptContent" class="mt-2 mb-0"
                             style="white-space: pre-wrap; word-wrap: break-word;"></pre>
                     </details>
+                </div>
+
+                <div class="reef-card mt-3" id="aiVisionCard">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold">Analyse IA texte + photos</div>
+                            <div class="small text-secondary">Selectionnez des photos de la galerie ou posez une
+                                question libre.</div>
+                        </div>
+                        <span class="badge bg-secondary-subtle text-dark" id="aiVisionImageCount">0/5 image(s)</span>
+                    </div>
+                    <div class="mt-2">
+                        <label class="form-label small" for="aiVisionPrompt">Question ou contexte</label>
+                        <textarea id="aiVisionPrompt" class="form-control form-control-sm" rows="3"
+                            placeholder="Exemple: observe les polypes des coraux et indique si tout semble normal."></textarea>
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center mt-3 flex-wrap gap-2">
+                        <div class="fw-semibold small mb-0">Photos selectionnables</div>
+                        <button class="btn btn-sm btn-outline-light" data-action="aiGalleryRefresh"
+                            type="button">Actualiser la galerie</button>
+                    </div>
+                    <div id="aiPhotoPicker" class="row row-cols-2 row-cols-md-4 g-2 mt-1"></div>
+                    <div class="d-flex align-items-center flex-wrap gap-2 mt-3">
+                        <button class="btn btn-primary" data-action="aiSendVisionPrompt" type="button">
+                            Envoyer a l'IA
+                        </button>
+                        <div class="text-secondary small" id="aiVisionStatus"></div>
+                    </div>
+                    <div id="aiVisionResult"
+                        class="mt-3 small bg-body-secondary bg-opacity-25 border border-secondary-subtle rounded p-2 d-none">
+                    </div>
+                </div>
+
+                <div class="reef-card mt-3" id="aiSummaryCard">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold">Resume telemetrie pour l'IA</div>
+                            <div class="small text-secondary" id="aiSummaryPeriodLabel">Dernieres 72h</div>
+                        </div>
+                        <div class="d-flex gap-2 flex-wrap">
+                            <select id="aiSummaryPeriodSelect" class="form-select form-select-sm">
+                                <option value="last_3_days">3 derniers jours</option>
+                                <option value="last_week">Semaine</option>
+                                <option value="last_month">Mois</option>
+                                <option value="last_year">Annee</option>
+                            </select>
+                            <button class="btn btn-outline-light btn-sm" data-action="aiSummaryRefresh"
+                                type="button">Actualiser</button>
+                        </div>
+                    </div>
+                    <div id="aiSummaryContent" class="small text-secondary mt-2">
+                        Chargement en attente...
+                    </div>
+                </div>
+
+                <div class="reef-card mt-3" id="aiWorkerCard">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold">Worker IA local</div>
+                            <div class="small text-secondary">Automatise les analyses periodiques
+                                (llm/ai_worker_local.py).</div>
+                        </div>
+                        <span class="badge bg-secondary-subtle text-dark" id="aiWorkerStatusBadge">Etat inconnu</span>
+                    </div>
+                    <div id="aiWorkerStatusDetails" class="small text-secondary mt-2">
+                        Chargement en attente...
+                    </div>
+                    <div class="d-flex gap-2 flex-wrap mt-3">
+                        <button class="btn btn-primary btn-sm" data-action="aiWorkerStart"
+                            type="button">Demarrer</button>
+                        <button class="btn btn-outline-light btn-sm" data-action="aiWorkerStop"
+                            type="button">Arreter</button>
+                        <button class="btn btn-outline-light btn-sm" data-action="aiWorkerRefresh"
+                            type="button">Rafraichir</button>
+                    </div>
+                </div>
+
+                <div class="reef-card mt-3" id="aiInsightsCard">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div class="fw-semibold">Insights IA stockes</div>
+                        <button class="btn btn-outline-light btn-sm" data-action="aiInsightsRefresh" type="button">
+                            Rafraichir
+                        </button>
+                    </div>
+                    <div id="aiInsightsList" class="mt-2 small text-secondary">
+                        Aucun insight enregistre.
+                    </div>
+                </div>
+
+                <div class="reef-card mt-3" id="aiConfigCard">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold">Configuration IA</div>
+                            <div class="small text-secondary">Selectionnez le mode local (LM Studio) ou cloud.</div>
+                        </div>
+                        <span class="badge bg-secondary-subtle text-dark" id="aiStatusBadge">Etat IA inconnu</span>
+                    </div>
+                    <div class="row g-3 align-items-end mt-1">
+                        <div class="col-md-4">
+                            <label class="form-label small" for="aiModeSelect">Mode IA actif</label>
+                            <select id="aiModeSelect" class="form-select form-select-sm" data-change="aiModeChanged">
+                                <option value="cloud">Cloud</option>
+                                <option value="local">Local (LM Studio)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4 col-lg-3">
+                            <label class="form-label small">&nbsp;</label>
+                            <button class="btn btn-outline-light w-100" data-action="aiTestConnection" type="button">
+                                Tester la connexion IA
+                            </button>
+                        </div>
+                    </div>
+                    <div id="aiConfigStatus" class="small text-secondary mt-2"></div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-6">
+                            <div class="fw-semibold small mb-2">Parametres mode local</div>
+                            <label class="form-label small" for="localAiBaseUrl">URL API locale</label>
+                            <input type="text" id="localAiBaseUrl" class="form-control form-control-sm"
+                                placeholder="http://127.0.0.1:1234/v1">
+                            <label class="form-label small mt-2" for="localAiModel">Modele local</label>
+                            <input type="text" id="localAiModel" class="form-control form-control-sm"
+                                placeholder="openai/gpt-oss-20b">
+                            <label class="form-label small mt-2" for="localAiApiKey">Cle API locale
+                                (optionnelle)</label>
+                            <input type="password" id="localAiApiKey" class="form-control form-control-sm"
+                                placeholder="Cle locale si necessaire">
+                            <div class="form-check form-check-sm mt-1">
+                                <input class="form-check-input" type="checkbox" id="localAiClearKey">
+                                <label class="form-check-label small" for="localAiClearKey">Supprimer la cle
+                                    locale</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="fw-semibold small mb-2">Parametres mode cloud</div>
+                            <label class="form-label small" for="cloudAiBaseUrl">URL API cloud</label>
+                            <input type="text" id="cloudAiBaseUrl" class="form-control form-control-sm"
+                                placeholder="https://api.openai.com/v1">
+                            <label class="form-label small mt-2" for="cloudAiModel">Modele cloud</label>
+                            <input type="text" id="cloudAiModel" class="form-control form-control-sm"
+                                placeholder="gpt-4o-mini">
+                            <label class="form-label small mt-2" for="cloudAiApiKey">Cle API cloud</label>
+                            <input type="password" id="cloudAiApiKey" class="form-control form-control-sm"
+                                placeholder="Cle OpenAI ou autre fournisseur">
+                            <div class="form-check form-check-sm mt-1">
+                                <input class="form-check-input" type="checkbox" id="cloudAiClearKey">
+                                <label class="form-check-label small" for="cloudAiClearKey">Supprimer la cle cloud lors
+                                    de
+                                    l'enregistrement</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-3 text-end">
+                        <button class="btn btn-primary" data-action="aiConfigSave" type="button">Enregistrer la
+                            configuration IA</button>
+                    </div>
                 </div>
             </div>
 

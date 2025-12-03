@@ -1,8 +1,13 @@
 import atexit
+import base64
 import json
+import subprocess
+import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 from uuid import uuid4
 
 import requests
@@ -19,10 +24,13 @@ from flask import (
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
+from ai_config import load_ai_config_for_client, save_ai_config
 from analysis import (
     OPENAI_KEY_MISSING_ERROR as ANALYSIS_KEY_MISSING_ERROR,
     ask_aquarium_ai,
+    build_ai_summary_payload,
     build_summary,
+    call_llm,
     load_analysis_queries,
     save_analysis_queries,
 )
@@ -44,6 +52,12 @@ LOGBOOK_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_LOGBOOK_PHOTOS = 8
 PHOTO_LABELS_PATH = BASE_DIR / "photo_labels.json"
 DEFAULT_PHOTO_CATEGORIES = ["Plante", "Produit", "Poisson"]
+AI_INSIGHTS_PATH = BASE_DIR / "ai_insights.json"
+MAX_AI_INSIGHTS = 100
+AI_IMAGE_SELECTION_LIMIT = 5
+AI_MAX_IMAGE_BYTES = 4 * 1024 * 1024
+AI_WORKER_SCRIPT = BASE_DIR / "llm" / "ai_worker_local.py"
+AI_WORKER_LOG = BASE_DIR / "ai_worker.log"
 
 app = Flask(__name__)
 
@@ -251,6 +265,171 @@ def _remove_photo_labels_for_files(filenames: Iterable[str]) -> None:
     if removed:
         _save_photo_label_data(data)
 
+
+def _load_ai_insights() -> List[Dict[str, Any]]:
+    if not AI_INSIGHTS_PATH.exists():
+        return []
+    try:
+        data = json.loads(AI_INSIGHTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    cleaned: List[Dict[str, Any]] = []
+    for entry in data:
+        if isinstance(entry, dict):
+            cleaned.append(entry)
+    return cleaned
+
+
+def _save_ai_insights(insights: List[Dict[str, Any]]) -> None:
+    AI_INSIGHTS_PATH.write_text(json.dumps(insights, indent=2), encoding="utf-8")
+
+
+def _append_ai_insight(entry: Dict[str, Any]) -> Dict[str, Any]:
+    insights = _load_ai_insights()
+    insights.insert(0, entry)
+    if len(insights) > MAX_AI_INSIGHTS:
+        insights = insights[:MAX_AI_INSIGHTS]
+    _save_ai_insights(insights)
+    return entry
+
+
+def _list_recent_photos(limit: int = 6) -> List[Dict[str, str]]:
+    try:
+        listing = camera_manager.list_media("photos", "desc", 1, max(limit, 1))
+    except Exception:
+        return []
+    items: List[Dict[str, str]] = []
+    for item in listing.get("items", []):
+        filename = item.get("filename")
+        if not filename:
+            continue
+        items.append(
+            {
+                "filename": filename,
+                "url": url_for("camera_media", filename=filename),
+                "thumbnail_url": url_for(
+                    "camera_media", filename=item.get("thumbnail") or filename
+                ),
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _encode_photo_to_data_url(filename: str) -> str:
+    clean_name = _ensure_photo_media_file(filename)
+    path = (camera_manager.save_directory / clean_name).resolve()
+    if not path.exists():
+        raise FileNotFoundError(clean_name)
+    if path.stat().st_size > AI_MAX_IMAGE_BYTES:
+        raise ValueError(f"Image trop volumineuse (> {AI_MAX_IMAGE_BYTES // (1024 * 1024)} Mo)")
+    suffix = path.suffix.lower()
+    mime = "image/jpeg"
+    if suffix == ".png":
+        mime = "image/png"
+    elif suffix in {".jpg", ".jpeg"}:
+        mime = "image/jpeg"
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
+
+_ai_worker_lock = threading.Lock()
+_ai_worker_process: Optional[subprocess.Popen] = None
+_ai_worker_log_handle: Optional[Any] = None
+_ai_worker_last_start: Optional[datetime] = None
+_ai_worker_last_stop: Optional[datetime] = None
+_ai_worker_last_exit: Optional[int] = None
+
+
+def _ai_worker_script_path() -> Path:
+    if not AI_WORKER_SCRIPT.exists():
+        raise RuntimeError("Script ai_worker_local.py introuvable.")
+    return AI_WORKER_SCRIPT
+
+
+def _finalize_ai_worker_locked() -> None:
+    global _ai_worker_process, _ai_worker_log_handle, _ai_worker_last_exit, _ai_worker_last_stop
+    if _ai_worker_process and _ai_worker_process.poll() is not None:
+        _ai_worker_last_exit = _ai_worker_process.returncode
+        _ai_worker_last_stop = datetime.utcnow()
+        _ai_worker_process = None
+        if _ai_worker_log_handle:
+            try:
+                _ai_worker_log_handle.close()
+            except Exception:
+                pass
+            _ai_worker_log_handle = None
+
+
+def _ai_worker_running_locked() -> bool:
+    _finalize_ai_worker_locked()
+    return _ai_worker_process is not None
+
+
+def _start_ai_worker_locked() -> Dict[str, Any]:
+    global _ai_worker_process, _ai_worker_log_handle, _ai_worker_last_start
+    if _ai_worker_running_locked():
+        raise RuntimeError("Le worker IA tourne déjà.")
+    script = _ai_worker_script_path()
+    AI_WORKER_LOG.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = open(AI_WORKER_LOG, "ab", buffering=0)
+    process = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        cwd=str(BASE_DIR),
+    )
+    _ai_worker_process = process
+    _ai_worker_log_handle = log_handle
+    _ai_worker_last_start = datetime.utcnow()
+    return {
+        "pid": process.pid,
+        "started_at": _ai_worker_last_start.isoformat() + "Z",
+    }
+
+
+def _stop_ai_worker_locked() -> bool:
+    global _ai_worker_process, _ai_worker_log_handle, _ai_worker_last_stop, _ai_worker_last_exit
+    if not _ai_worker_process:
+        return False
+    proc = _ai_worker_process
+    _ai_worker_process = None
+    if _ai_worker_log_handle:
+        try:
+            _ai_worker_log_handle.flush()
+        except Exception:
+            pass
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=2)
+    _ai_worker_last_stop = datetime.utcnow()
+    _ai_worker_last_exit = proc.returncode
+    if _ai_worker_log_handle:
+        try:
+            _ai_worker_log_handle.close()
+        except Exception:
+            pass
+        _ai_worker_log_handle = None
+    return True
+
+
+def _ai_worker_status_locked() -> Dict[str, Any]:
+    running = _ai_worker_running_locked()
+    pid = _ai_worker_process.pid if running and _ai_worker_process else None
+    return {
+        "running": running,
+        "pid": pid,
+        "started_at": _ai_worker_last_start.isoformat() + "Z" if _ai_worker_last_start else None,
+        "last_exit_code": _ai_worker_last_exit,
+        "stopped_at": _ai_worker_last_stop.isoformat() + "Z" if _ai_worker_last_stop else None,
+        "log_path": str(AI_WORKER_LOG),
+    }
 
 
 
@@ -478,6 +657,13 @@ def api_action():
         elif action == "submit_water_quality":
 
             controller.submit_water_quality(params)
+
+        elif action == "ph_calibrate":
+
+            cal_state = controller.calibrate_ph_reference(
+                params.get("reference") or params.get("ref")
+            )
+            return jsonify({"ok": True, "calibration": cal_state})
 
         elif action == "raw":
 
@@ -1443,6 +1629,189 @@ def ask_analysis():
         app.logger.exception("AI analysis failed")
 
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+
+
+@app.get("/api/ai/config")
+def api_ai_config_get():
+    return jsonify({"ok": True, "config": load_ai_config_for_client()})
+
+
+@app.post("/api/ai/config")
+def api_ai_config_save():
+    payload = request.get_json(force=True) or {}
+    try:
+        updated = save_ai_config(payload)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception("AI config save failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "config": updated})
+
+
+@app.post("/api/ai/test")
+def api_ai_test():
+    payload = request.get_json(silent=True) or {}
+    mode = payload.get("mode")
+    try:
+        start = time.monotonic()
+        result = call_llm(
+            [
+                {"role": "system", "content": "Tu es un service IA de diagnostic."},
+                {"role": "user", "content": "Reponds par 'pong' pour confirmer que tu es disponible."},
+            ],
+            force_mode=mode if isinstance(mode, str) else None,
+            allow_fallback=False,
+            request_timeout=20,
+        )
+        latency = (time.monotonic() - start) * 1000.0
+        return jsonify(
+            {
+                "ok": True,
+                "mode_used": result.get("mode_used"),
+                "latency_ms": round(latency, 2),
+                "reply": result.get("content"),
+            }
+        )
+    except RuntimeError as exc:
+        status = 400 if str(exc) == ANALYSIS_KEY_MISSING_ERROR else 502
+        return jsonify({"ok": False, "error": str(exc)}), status
+    except Exception as exc:
+        app.logger.exception("AI test failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.get("/api/ai/summary")
+def api_ai_summary():
+    period = request.args.get("period", "last_3_days")
+    try:
+        summary = build_ai_summary_payload(period)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception("AI summary build failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    summary["images"] = _list_recent_photos(limit=6)
+    return jsonify({"ok": True, "summary": summary})
+
+
+@app.post("/api/ai/analyze_with_images")
+def api_ai_analyze_with_images():
+    payload = request.get_json(force=True) or {}
+    prompt = (payload.get("prompt") or "").strip()
+    image_filenames = payload.get("image_filenames") or []
+    if not prompt and not image_filenames:
+        return jsonify({"ok": False, "error": "Prompt ou images requis."}), 400
+    if not isinstance(image_filenames, list):
+        return jsonify({"ok": False, "error": "Liste d'images invalide."}), 400
+    if len(image_filenames) > AI_IMAGE_SELECTION_LIMIT:
+        return jsonify({"ok": False, "error": f"Maximum {AI_IMAGE_SELECTION_LIMIT} images."}), 400
+    encoded_chunks = []
+    attached_images = []
+    for raw_name in image_filenames:
+        if not isinstance(raw_name, str):
+            continue
+        try:
+            data_url = _encode_photo_to_data_url(raw_name)
+        except (ValueError, FileNotFoundError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            app.logger.exception("Image encoding failed")
+            return jsonify({"ok": False, "error": str(exc)}), 500
+        encoded_chunks.append({"type": "image_url", "image_url": {"url": data_url}})
+        attached_images.append(
+            {
+                "filename": raw_name,
+                "url": url_for("camera_media", filename=raw_name),
+            }
+        )
+    if encoded_chunks:
+        user_content = [{"type": "text", "text": prompt or "Analyse ces photos."}] + encoded_chunks
+    else:
+        user_content = prompt
+    messages = [
+        {
+            "role": "system",
+            "content": "Tu es une IA experte en aquariophilie. Analyse les observations et photos fournies pour conseiller sur l'etat de l'aquarium.",
+        },
+        {"role": "user", "content": user_content},
+    ]
+    try:
+        result = call_llm(messages, temperature=0.3, allow_fallback=True)
+    except RuntimeError as exc:
+        status = 400 if str(exc) == ANALYSIS_KEY_MISSING_ERROR else 502
+        return jsonify({"ok": False, "error": str(exc)}), status
+    except Exception as exc:
+        app.logger.exception("AI vision analysis failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "analysis": result.get("content") or "Pas de reponse IA.",
+            "mode_used": result.get("mode_used"),
+            "images": attached_images,
+        }
+    )
+
+
+@app.get("/api/ai/insights")
+def api_ai_insights():
+    return jsonify({"ok": True, "insights": _load_ai_insights()})
+
+
+@app.post("/api/ai/insight")
+def api_ai_insight_post():
+    payload = request.get_json(force=True) or {}
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "Texte requis."}), 400
+    source = (payload.get("source") or "manual").strip() or "manual"
+    risk_level = (payload.get("risk_level") or "info").strip() or "info"
+    entry = {
+        "id": uuid4().hex,
+        "text": text,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "source": source,
+        "risk_level": risk_level,
+        "mode": payload.get("mode") or "",
+        "metadata": payload.get("metadata") or {},
+    }
+    try:
+        stored = _append_ai_insight(entry)
+    except Exception as exc:
+        app.logger.exception("AI insight save failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "insight": stored})
+
+
+@app.get("/api/ai/worker/status")
+def api_ai_worker_status():
+    with _ai_worker_lock:
+        status = _ai_worker_status_locked()
+    return jsonify({"ok": True, "status": status})
+
+
+@app.post("/api/ai/worker/start")
+def api_ai_worker_start():
+    try:
+        with _ai_worker_lock:
+            data = _start_ai_worker_locked()
+        return jsonify({"ok": True, "started": data})
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception("AI worker start failed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/api/ai/worker/stop")
+def api_ai_worker_stop():
+    with _ai_worker_lock:
+        stopped = _stop_ai_worker_locked()
+        status = _ai_worker_status_locked()
+    return jsonify({"ok": True, "stopped": stopped, "status": status})
 
 
 

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,11 +10,12 @@ import requests
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.flux_table import FluxRecord
 
+from ai_config import load_ai_config
+
 
 BASE_DIR = Path(__file__).resolve().parent
 ANALYSIS_QUERIES_PATH = BASE_DIR / "analysis_queries.json"
 DEFAULT_BUCKET = os.environ.get("INFLUXDB_BUCKET", "reef-data")
-OPENAI_KEY_FILE_PATH = BASE_DIR / ".openai_api_key"
 OPENAI_KEY_MISSING_ERROR = "OPENAI_API_KEY_MISSING"
 BUCKET_BY_PERIOD = {
     "last_3_days": "6h",
@@ -69,6 +71,8 @@ from(bucket: "{DEFAULT_BUCKET}")
 }
 
 _influx_client: Optional[InfluxDBClient] = None
+logger = logging.getLogger("reef.analysis")
+AI_CALL_TIMEOUT = 60
 
 
 def _ensure_queries_file() -> None:
@@ -485,18 +489,145 @@ def _parse_time(time_str: str) -> Optional[datetime]:
         return None
 
 
-def _load_ai_api_key() -> Optional[str]:
-    env_key = os.environ.get("AQUARIUM_AI_KEY") or os.environ.get("OPENAI_API_KEY")
-    if env_key:
-        return env_key.strip()
-    if OPENAI_KEY_FILE_PATH.exists():
+def _prepare_provider_configs(config: Dict[str, Any]) -> Dict[str, Optional[Dict[str, Any]]]:
+    local_base = (config.get("local_ai_base_url") or "").strip()
+    local_model = (config.get("local_ai_model") or "").strip()
+    local_key = (config.get("local_ai_api_key") or "").strip()
+    cloud_base = (config.get("cloud_ai_base_url") or "").strip()
+    cloud_model = (config.get("cloud_ai_model") or "").strip()
+    cloud_key = (config.get("cloud_ai_api_key") or "").strip()
+    providers: Dict[str, Optional[Dict[str, Any]]] = {"local": None, "cloud": None}
+    if local_base and local_model:
+        providers["local"] = {
+            "mode": "local",
+            "base_url": local_base.rstrip("/"),
+            "model": local_model,
+            "api_key": local_key,
+        }
+    if cloud_base and cloud_model and cloud_key:
+        providers["cloud"] = {
+            "mode": "cloud",
+            "base_url": cloud_base.rstrip("/"),
+            "model": cloud_model,
+            "api_key": cloud_key,
+        }
+    return providers
+
+
+def _extract_message_content(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for chunk in content:
+            if not isinstance(chunk, dict):
+                continue
+            text = chunk.get("text")
+            if text:
+                parts.append(str(text))
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _call_provider(
+    provider: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    temperature: float,
+    max_tokens: Optional[int],
+    timeout: int,
+) -> Dict[str, Any]:
+    endpoint = f"{provider['base_url']}/chat/completions"
+    payload: Dict[str, Any] = {"model": provider["model"], "messages": messages, "temperature": temperature}
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    headers = {"Content-Type": "application/json", "User-Agent": "ReefControl/1.0"}
+    api_key = provider.get("api_key")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Connexion IA impossible: {exc}") from exc
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+    data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("Réponse vide du modèle.")
+    message = choices[0].get("message") or {}
+    content = _extract_message_content(message)
+    if not content:
+        raise RuntimeError("Contenu IA indisponible.")
+    return {"content": content, "raw": data}
+
+
+def call_llm(
+    messages: List[Dict[str, Any]],
+    *,
+    temperature: float = 0.4,
+    max_tokens: Optional[int] = None,
+    allow_fallback: bool = True,
+    force_mode: Optional[str] = None,
+    request_timeout: int = AI_CALL_TIMEOUT,
+) -> Dict[str, Any]:
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("Messages IA invalides.")
+    config = load_ai_config(include_secrets=True)
+    providers = _prepare_provider_configs(config)
+    order: List[str] = []
+
+    def _mode_available(mode: str) -> bool:
+        return providers.get(mode) is not None
+
+    if force_mode:
+        mode_norm = force_mode.lower()
+        if mode_norm not in {"local", "cloud"}:
+            raise ValueError("Mode IA inconnu.")
+        if not _mode_available(mode_norm):
+            if mode_norm == "cloud":
+                raise RuntimeError(OPENAI_KEY_MISSING_ERROR)
+            raise RuntimeError("Configuration IA locale incomplète.")
+        order = [mode_norm]
+    else:
+        preferred = config.get("ai_mode", "cloud")
+        if _mode_available(preferred):
+            order.append(preferred)
+        fallback = "cloud" if preferred == "local" else "local"
+        if allow_fallback and _mode_available(fallback) and fallback not in order:
+            order.append(fallback)
+
+    if not order:
+        if config.get("ai_mode") == "cloud":
+            raise RuntimeError(OPENAI_KEY_MISSING_ERROR)
+        raise RuntimeError("Aucun moteur IA disponible.")
+
+    errors: List[str] = []
+    for mode in order:
+        provider = providers.get(mode)
+        if not provider:
+            continue
         try:
-            key = OPENAI_KEY_FILE_PATH.read_text(encoding="utf-8").strip()
-            if key:
-                return key
-        except OSError:
-            return None
-    return None
+            logger.info("Appel IA via mode %s", mode)
+            result = _call_provider(
+                provider,
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=request_timeout,
+            )
+            result["mode_used"] = mode
+            return result
+        except RuntimeError as exc:
+            logger.warning("Appel IA (%s) en échec: %s", mode, exc)
+            if mode == "cloud" and str(exc) == OPENAI_KEY_MISSING_ERROR:
+                raise
+            errors.append(f"{mode}: {exc}")
+        except Exception as exc:
+            logger.warning("Appel IA (%s) erreur inattendue: %s", mode, exc)
+            errors.append(f"{mode}: {exc}")
+
+    raise RuntimeError("Echec appel IA - " + " | ".join(errors))
 
 
 def ask_aquarium_ai(
@@ -504,11 +635,6 @@ def ask_aquarium_ai(
     user_context: str = "",
     client_timestamp: Optional[str] = None,
 ) -> Dict[str, str]:
-    api_key = _load_ai_api_key()
-    api_url = os.environ.get("AQUARIUM_AI_URL", "https://api.openai.com/v1/chat/completions")
-    model = os.environ.get("AQUARIUM_AI_MODEL", "gpt-4o-mini")
-    if not api_key:
-        raise RuntimeError(OPENAI_KEY_MISSING_ERROR)
     request_time = client_timestamp or datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
     extra_context = user_context.strip()
     context_section = f"\nContexte utilisateur: {extra_context}" if extra_context else ""
@@ -522,29 +648,84 @@ def ask_aquarium_ai(
         "3. Actions recommandées à court terme."
         f"{context_section}"
     )
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "Tu es une IA experte en aquariophilie."},
-            {
-                "role": "user",
-                "content": prompt_text,
-            },
-        ],
-        "temperature": 0.4,
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-    if response.status_code >= 400:
-        raise RuntimeError(f"Erreur appel IA: HTTP {response.status_code} - {response.text}")
-    data = response.json()
-    try:
-        analysis_text = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
-        raise RuntimeError("Réponse IA invalide.")
-    if not analysis_text:
-        analysis_text = "L'IA n'a pas fourni de contenu exploitable."
+    messages = [
+        {"role": "system", "content": "Tu es une IA experte en aquariophilie."},
+        {"role": "user", "content": prompt_text},
+    ]
+    result = call_llm(messages, temperature=0.4, allow_fallback=True)
+    analysis_text = result.get("content") or "L'IA n'a pas fourni de contenu exploitable."
     return {
         "analysis": analysis_text,
         "prompt": prompt_text,
+        "mode_used": result.get("mode_used"),
+    }
+
+
+def _format_stat_value(values: Dict[str, Any]) -> str:
+    latest = values.get("latest")
+    if isinstance(latest, (int, float)):
+        return f"{latest:.2f}"
+    avg = values.get("avg")
+    if isinstance(avg, (int, float)):
+        return f"{avg:.2f}"
+    return "--"
+
+
+def _build_telemetry_summary_text(period_summary: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    temps = period_summary.get("temperatures") or {}
+    if temps:
+        sensor_lines = []
+        for sensor, stats in temps.items():
+            sensor_lines.append(f"{sensor}: {_format_stat_value(stats)}°C")
+        parts.append("Températures " + ", ".join(sensor_lines))
+    ph_stats = (period_summary.get("ph") or {}).get("ph")
+    if ph_stats:
+        parts.append(f"pH moyen {ph_stats.get('avg', '--')}")
+    lux_stats = period_summary.get("lux") or {}
+    if isinstance(lux_stats.get("avg"), (int, float)):
+        parts.append(f"Luminosité moyenne {lux_stats['avg']:.0f} lux")
+    heater = period_summary.get("heater") or {}
+    if heater.get("latest_state"):
+        state = heater["latest_state"].get("value")
+        if state is not None:
+            parts.append(f"Chauffage {'actif' if state else 'arrêté'}")
+    peristaltic = period_summary.get("peristaltic") or {}
+    volumes = peristaltic.get("volumes_ml") or {}
+    if volumes:
+        total = sum(float(value) for value in volumes.values())
+        parts.append(f"Doses péristaltiques totales {total:.1f} ml")
+    manual_latest = (period_summary.get("manual_water") or {}).get("latest") or {}
+    if manual_latest:
+        metrics = ", ".join(f"{name.upper()} {entry['value']}" for name, entry in manual_latest.items())
+        parts.append(f"Mesures manuelles: {metrics}")
+    if not parts:
+        return "Aucune donnée récente n'est disponible."
+    return " | ".join(parts)
+
+
+def build_ai_summary_payload(period: str = "last_3_days") -> Dict[str, Any]:
+    summary = build_summary([period])
+    period_data = summary["periods"].get(period)
+    if not period_data:
+        raise ValueError(f"Aucune donnée pour la période {period}.")
+    telemetry_summary = _build_telemetry_summary_text(period_data)
+    events = list(period_data.get("device_events") or [])
+    events = events[-20:]
+    return {
+        "period": period,
+        "generated_at": summary["generated_at"],
+        "telemetry_summary": telemetry_summary,
+        "range": period_data.get("range"),
+        "stats": {
+            "temperatures": period_data.get("temperatures"),
+            "ph": period_data.get("ph"),
+            "lux": period_data.get("lux"),
+            "water_levels": period_data.get("water_levels"),
+            "peristaltic": period_data.get("peristaltic"),
+            "heater": period_data.get("heater"),
+            "manual_water": period_data.get("manual_water"),
+            "relay_states": period_data.get("relay_states"),
+        },
+        "events": events,
     }

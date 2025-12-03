@@ -27,6 +27,8 @@ static const float R0 = 100000.0f;
 static const float T0K = 298.15f;
 
 // --------------- PID controller ----------
+typedef float (*SensorReader)();
+
 typedef struct PIDCtrl
 {
   float target;
@@ -37,8 +39,7 @@ typedef struct PIDCtrl
   float prevE;
   unsigned long last_ms;
   int out_pin;
-  int sensor_pin;
-  bool use_ds18;
+  SensorReader sensor_func;
   float minC;
   float maxC;
   bool fault;
@@ -70,11 +71,8 @@ static PIDCtrl pid_reserve;
 #define AIR_DS_PIN 2   // X_MAX endstop (digital) pour DS18B20 air
 #define YMIN_DS_PIN 14 // Y_MIN endstop (digital) pour DS18B20 #3
 #define YMAX_DS_PIN 15 // Y_MAX endstop (digital) pour DS18B20 #4
-// pH sur T0/A13. Thermistances : auxiliaire sur A12 (AUX-2). Eau/Air/sondes Y en DS18B20.
-#define TH_WATER A15
-#define TH_AIR A14
-#define TH_AUX A12
-#define PH_PIN A13 // T0
+// pH sur AUX-2 / A9 (entrée analogique libre). Les thermistances analogiques ne sont plus utilisées (toutes les mesures utiles viennent des DS18B20).
+#define PH_PIN A9
 
 #define LVL_LOW_PIN 18  // Z_MIN
 #define LVL_HIGH_PIN 19 // Z_MAX
@@ -112,17 +110,6 @@ static float read_ph_voltage()
   return (raw / 1023.0f) * 5.0f;
 }
 
-static float read_tempC(uint8_t pin)
-{
-  int raw = analogRead(pin);
-  if (raw <= 2 || raw >= 1022)
-    return NAN;
-  float v = (raw / 1023.0f) * 5.0f;
-  float r = (v * R_SERIE) / (5.0f - v);
-  float invT = (1.0f / T0K) + (1.0f / BETA) * log(r / R0);
-  return (1.0f / invT) - 273.15f;
-}
-
 static float read_water_tempC()
 {
   return cached_ds[0];
@@ -147,7 +134,7 @@ static bool level_low() { return digitalRead(LVL_LOW_PIN) == LOW; }
 static bool level_high() { return digitalRead(LVL_HIGH_PIN) == LOW; }
 static bool level_alert() { return digitalRead(LVL_ALERT_PIN) == LOW; }
 
-static void pid_controller_init(PIDCtrl *p, int out_pin, int sensor_pin, float maxC, bool use_ds18 = false)
+static void pid_controller_init(PIDCtrl *p, int out_pin, SensorReader sensor_func, float maxC)
 {
   if (!p)
     return;
@@ -159,8 +146,7 @@ static void pid_controller_init(PIDCtrl *p, int out_pin, int sensor_pin, float m
   p->prevE = 0.0f;
   p->last_ms = 0;
   p->out_pin = out_pin;
-  p->sensor_pin = sensor_pin;
-  p->use_ds18 = use_ds18;
+  p->sensor_func = sensor_func;
   p->minC = -5.0f;
   p->maxC = maxC;
   p->fault = false;
@@ -180,7 +166,7 @@ static int pid_controller_compute(PIDCtrl *p)
 {
   if (!p)
     return 0;
-  float t = p->use_ds18 ? read_water_tempC() : read_tempC(p->sensor_pin);
+  float t = p->sensor_func ? p->sensor_func() : NAN;
   if (isnan(t) || t < p->minC - 1 || t > p->maxC + 5)
   {
     p->fault = true;
@@ -352,7 +338,7 @@ static void fan_service()
     analogWrite(FAN_PIN, constrain(fan_manual, 0, 255));
     return;
   }
-  float ta = read_tempC(TH_AIR);
+  float ta = read_air_tempC();
   if (isnan(ta) || ta <= autocool_thresh)
   {
     analogWrite(FAN_PIN, 0);
@@ -398,8 +384,6 @@ static void send_status()
   Serial.print(read_water_tempC(), 1);
   Serial.print(";TEMPA=");
   Serial.print(read_air_tempC(), 1);
-  Serial.print(";TEMPAUX=");
-  Serial.print(read_tempC(TH_AUX), 1);
   Serial.print(";TEMPYMIN=");
   Serial.print(read_ymin_tempC(), 1);
   Serial.print(";TEMPYMAX=");
@@ -419,8 +403,6 @@ static void send_temps()
   Serial.print(read_water_tempC(), 1);
   Serial.print("|T_AIR:");
   Serial.print(read_air_tempC(), 1);
-  Serial.print("|T_AUX:");
-  Serial.print(read_tempC(TH_AUX), 1);
   Serial.print("|T_YMIN:");
   Serial.print(read_ymin_tempC(), 1);
   Serial.print("|T_YMAX:");
@@ -677,8 +659,8 @@ void setup()
   pinMode(HEAT_RES_PIN, OUTPUT);
   pinMode(FAN_PIN, OUTPUT);
 
-  pid_controller_init(&pid_water, HEAT_WATER_PIN, TH_WATER, 40.0f, true);
-  pid_controller_init(&pid_reserve, HEAT_RES_PIN, TH_AUX, 60.0f);
+  pid_controller_init(&pid_water, HEAT_WATER_PIN, read_water_tempC, 40.0f);
+  pid_controller_init(&pid_reserve, HEAT_RES_PIN, NULL, 60.0f); // reserve desactivee faute de capteur
 
   feeder.attach(SERVO_PIN);
   move_servo(10);

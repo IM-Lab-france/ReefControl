@@ -10,6 +10,7 @@
 const DEFAULT_FEEDER_PUMP_STOP_DURATION = 5;
 const LAST_ACTIVE_TAB_KEY = "reef_active_tab";
 const LAST_CAMERA_SUBTAB_KEY = "reef_camera_subtab";
+const PH_CAL_REFERENCES = ["4.01", "6.86", "9.18"];
 
 let refreshTimer = null;
 let currentPumpConfig = {};
@@ -61,6 +62,15 @@ const ANALYSIS_PERIOD_LABELS = {
   last_month: "-7 jours à -1 mois",
   last_year: "-1 mois à -1 an",
 };
+const AI_IMAGE_SELECTION_LIMIT = 5;
+let aiConfigState = null;
+let aiSummaryState = null;
+let aiInsightsState = [];
+let aiSelectedPhotos = new Set();
+let aiPhotoPool = [];
+let aiWorkerStatusState = null;
+let aiWorkerStatusTimer = null;
+
 
 async function apiAction(action, params = {}) {
   try {
@@ -176,6 +186,19 @@ function submitWaterQuality() {
     return;
   }
   apiAction("submit_water_quality", params);
+}
+
+async function handlePhCalibration(el) {
+  const ref = el?.dataset?.ref;
+  if (!ref) return;
+  const confirmed = await showPopin(
+    `Plongez la sonde dans la solution pH ${ref}, attendez 30 secondes puis confirmez.`,
+    "info",
+    { confirmable: true, confirmText: `Calibrer ${ref}`, cancelText: "Annuler" }
+  );
+  if (!confirmed) return;
+  await apiAction("ph_calibrate", { reference: ref });
+  refreshState();
 }
 
 async function saveOpenAiKey(apiKey) {
@@ -386,6 +409,525 @@ async function getAiAnalysis() {
   }
 }
 
+async function loadAiConfig() {
+  try {
+    const res = await fetch("/api/ai/config");
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.error || "Reponse invalide");
+    }
+    applyAiConfigToForm(data.config || {});
+  } catch (err) {
+    console.error("loadAiConfig", err);
+    showToast(`Configuration IA: ${err.message}`, "danger");
+  }
+}
+
+function applyAiConfigToForm(config = {}) {
+  aiConfigState = config;
+  const modeSelect = document.getElementById("aiModeSelect");
+  if (modeSelect) {
+    modeSelect.value = (config.ai_mode || "cloud").toLowerCase();
+  }
+  const localBase = document.getElementById("localAiBaseUrl");
+  if (localBase && !localBase.matches(":focus")) {
+    localBase.value = config.local_ai_base_url || "";
+  }
+  const localModel = document.getElementById("localAiModel");
+  if (localModel && !localModel.matches(":focus")) {
+    localModel.value = config.local_ai_model || "";
+  }
+  const localKey = document.getElementById("localAiApiKey");
+  if (localKey && !localKey.matches(":focus")) {
+    localKey.value = "";
+  }
+  const localClear = document.getElementById("localAiClearKey");
+  if (localClear) {
+    localClear.checked = false;
+    localClear.disabled = !config.local_ai_has_key;
+  }
+  const cloudBase = document.getElementById("cloudAiBaseUrl");
+  if (cloudBase && !cloudBase.matches(":focus")) {
+    cloudBase.value = config.cloud_ai_base_url || "";
+  }
+  const cloudModel = document.getElementById("cloudAiModel");
+  if (cloudModel && !cloudModel.matches(":focus")) {
+    cloudModel.value = config.cloud_ai_model || "";
+  }
+  const cloudKey = document.getElementById("cloudAiApiKey");
+  if (cloudKey && !cloudKey.matches(":focus")) {
+    cloudKey.value = "";
+  }
+  const cloudClear = document.getElementById("cloudAiClearKey");
+  if (cloudClear) {
+    cloudClear.checked = false;
+    cloudClear.disabled = !config.cloud_ai_has_key;
+  }
+  updateAiStatusBadge();
+  const status = document.getElementById("aiConfigStatus");
+  if (status) {
+    status.textContent = "Configuration IA chargee.";
+  }
+}
+
+function updateAiStatusBadge() {
+  const badge = document.getElementById("aiStatusBadge");
+  if (!badge) return;
+  const modeSelect = document.getElementById("aiModeSelect");
+  const mode = modeSelect ? modeSelect.value : "cloud";
+  const hasCloudKey =
+    aiConfigState && (aiConfigState.cloud_ai_has_key || aiConfigState.cloud_ai_api_key);
+  let text = mode === "local" ? "Mode local selectionne" : "Mode cloud selectionne";
+  badge.classList.remove("bg-success", "bg-info", "bg-danger", "bg-secondary-subtle");
+  if (mode === "cloud" && !hasCloudKey) {
+    text += " - cle manquante";
+    badge.classList.add("bg-danger");
+  } else {
+    badge.classList.add(mode === "local" ? "bg-info" : "bg-success");
+  }
+  badge.textContent = text;
+}
+
+function onAiModeChanged() {
+  updateAiStatusBadge();
+}
+
+async function saveAiConfig() {
+  const mode = document.getElementById("aiModeSelect")?.value || "cloud";
+  const payload = {
+    ai_mode: mode,
+    local_ai_base_url: document.getElementById("localAiBaseUrl")?.value?.trim() || "",
+    local_ai_model: document.getElementById("localAiModel")?.value?.trim() || "",
+    cloud_ai_base_url: document.getElementById("cloudAiBaseUrl")?.value?.trim() || "",
+    cloud_ai_model: document.getElementById("cloudAiModel")?.value?.trim() || "",
+  };
+  const localKeyInput = document.getElementById("localAiApiKey");
+  const localKeyClear = document.getElementById("localAiClearKey");
+  const localKeyValue = localKeyInput?.value?.trim() || "";
+  if (localKeyValue) {
+    payload.local_ai_api_key = localKeyValue;
+  } else if (localKeyClear?.checked) {
+    payload.local_ai_api_key = "";
+  } else {
+    payload.local_ai_api_key = null;
+  }
+  const cloudKeyInput = document.getElementById("cloudAiApiKey");
+  const cloudKeyClear = document.getElementById("cloudAiClearKey");
+  const cloudKeyValue = cloudKeyInput?.value?.trim() || "";
+  if (cloudKeyValue) {
+    payload.cloud_ai_api_key = cloudKeyValue;
+  } else if (cloudKeyClear?.checked) {
+    payload.cloud_ai_api_key = "";
+  } else {
+    payload.cloud_ai_api_key = null;
+  }
+  const status = document.getElementById("aiConfigStatus");
+  if (status) {
+    status.textContent = "Enregistrement de la configuration IA...";
+  }
+  try {
+    const res = await fetch("/api/ai/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    applyAiConfigToForm(data.config || {});
+    if (localKeyInput) localKeyInput.value = "";
+    if (cloudKeyInput) cloudKeyInput.value = "";
+    showToast("Configuration IA enregistree.", "success");
+    if (status) {
+      status.textContent = "Configuration IA mise a jour.";
+    }
+  } catch (err) {
+    console.error("saveAiConfig", err);
+    if (status) {
+      status.textContent = `Erreur configuration IA: ${err.message}`;
+    }
+    showToast(`Config IA: ${err.message}`, "danger");
+  }
+}
+
+async function testAiConnection() {
+  const status = document.getElementById("aiConfigStatus");
+  if (status) {
+    status.textContent = "Test de connexion IA en cours...";
+  }
+  const mode = document.getElementById("aiModeSelect")?.value || undefined;
+  try {
+    const res = await fetch("/api/ai/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    if (status) {
+      status.textContent = `IA connectee (${data.mode_used || mode}) - ${data.latency_ms} ms`;
+    }
+    showToast("Test IA reussi.", "success");
+  } catch (err) {
+    console.error("testAiConnection", err);
+    if (status) {
+      status.textContent = `Test IA echoue: ${err.message}`;
+    }
+    showToast(`IA indisponible: ${err.message}`, "danger");
+  }
+}
+
+async function loadAiPhotoOptions() {
+  const status = document.getElementById("aiVisionStatus");
+  if (status) {
+    status.textContent = "Chargement des photos...";
+  }
+  try {
+    const res = await fetch("/gallery/media?type=photos&sort=desc&per_page=20");
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.error || "Reponse galerie invalide");
+    }
+    aiPhotoPool = Array.isArray(data.items) ? data.items : [];
+    aiSelectedPhotos.forEach((filename) => {
+      if (!aiPhotoPool.some((item) => item.filename === filename)) {
+        aiSelectedPhotos.delete(filename);
+      }
+    });
+    renderAiPhotoPicker(aiPhotoPool);
+    if (status) {
+      status.textContent = "";
+    }
+  } catch (err) {
+    console.error("loadAiPhotoOptions", err);
+    if (status) status.textContent = `Erreur galerie: ${err.message}`;
+    showToast(`Photos indisponibles: ${err.message}`, "danger");
+    renderAiPhotoPicker([]);
+  }
+}
+
+function renderAiPhotoPicker(photos = []) {
+  const container = document.getElementById("aiPhotoPicker");
+  if (!container) return;
+  if (!photos.length) {
+    container.innerHTML =
+      '<div class="col"><div class="small text-secondary">Aucune photo disponible.</div></div>';
+    updateAiVisionCountBadge();
+    return;
+  }
+  container.innerHTML = "";
+  photos.forEach((photo) => {
+    const col = document.createElement("div");
+    col.className = "col";
+    const selected = aiSelectedPhotos.has(photo.filename);
+    col.innerHTML = `
+      <div class="ai-photo-option card border ${
+        selected ? "border-info shadow" : "border-secondary-subtle"
+      } overflow-hidden" role="button" data-photo-name="${photo.filename}">
+        <img src="${photo.thumbnail_url || photo.url}" class="card-img-top" alt="${photo.filename}">
+        <div class="card-body py-1 px-2">
+          <div class="small text-truncate">${photo.filename}</div>
+        </div>
+      </div>`;
+    container.appendChild(col);
+  });
+  updateAiVisionCountBadge();
+}
+
+function toggleAiPhotoSelection(filename) {
+  if (!filename) return;
+  if (aiSelectedPhotos.has(filename)) {
+    aiSelectedPhotos.delete(filename);
+  } else {
+    if (aiSelectedPhotos.size >= AI_IMAGE_SELECTION_LIMIT) {
+      showToast(`Maximum ${AI_IMAGE_SELECTION_LIMIT} images.`, "warning");
+      return;
+    }
+    aiSelectedPhotos.add(filename);
+  }
+  renderAiPhotoPicker(aiPhotoPool);
+}
+
+function updateAiVisionCountBadge() {
+  const badge = document.getElementById("aiVisionImageCount");
+  if (!badge) return;
+  badge.textContent = `${aiSelectedPhotos.size}/${AI_IMAGE_SELECTION_LIMIT} image(s)`;
+}
+
+async function sendAiVisionRequest() {
+  const prompt = document.getElementById("aiVisionPrompt")?.value?.trim() || "";
+  const images = Array.from(aiSelectedPhotos);
+  if (!prompt && images.length === 0) {
+    showToast("Indiquez un prompt ou selectionnez des photos.", "warning");
+    return;
+  }
+  const status = document.getElementById("aiVisionStatus");
+  const btn = document.querySelector('[data-action="aiSendVisionPrompt"]');
+  if (status) status.textContent = "Analyse IA en cours...";
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/ai/analyze_with_images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, image_filenames: images }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    const resultEl = document.getElementById("aiVisionResult");
+    if (resultEl) {
+      resultEl.classList.remove("d-none");
+      resultEl.innerHTML = `<div class="fw-semibold mb-1">Mode ${
+        data.mode_used || "inconnu"
+      }</div><pre class="mb-0" style="white-space: pre-wrap;">${escapeHtml(
+        data.analysis || ""
+      )}</pre>`;
+    }
+    showToast("Analyse IA terminee.", "success");
+    if (status) status.textContent = "";
+  } catch (err) {
+    console.error("sendAiVisionRequest", err);
+    if (status) status.textContent = `Erreur IA: ${err.message}`;
+    showToast(`Analyse IA impossible: ${err.message}`, "danger");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function loadAiSummary(initial = false) {
+  const select = document.getElementById("aiSummaryPeriodSelect");
+  const period = select ? select.value : "last_3_days";
+  const label = document.getElementById("aiSummaryPeriodLabel");
+  if (label) {
+    const readable = ANALYSIS_PERIOD_LABELS[period] || period;
+    label.textContent = `Periode: ${readable}`;
+  }
+  const content = document.getElementById("aiSummaryContent");
+  if (content && !initial) {
+    content.textContent = "Chargement du resume IA...";
+  }
+  try {
+    const res = await fetch(`/api/ai/summary?period=${encodeURIComponent(period)}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.error || "Resume IA indisponible");
+    }
+    aiSummaryState = data.summary;
+    renderAiSummary(aiSummaryState);
+  } catch (err) {
+    console.error("loadAiSummary", err);
+    if (content) {
+      content.innerHTML = `<div class="alert alert-danger mb-0">Erreur resume IA: ${escapeHtml(
+        err.message
+      )}</div>`;
+    }
+  }
+}
+
+function renderAiSummary(summary) {
+  const container = document.getElementById("aiSummaryContent");
+  if (!container) return;
+  if (!summary) {
+    container.textContent = "Aucun resume disponible.";
+    return;
+  }
+  const parts = [];
+  if (summary.telemetry_summary) {
+    parts.push(
+      `<div class="mb-2">${escapeHtml(summary.telemetry_summary)}</div>`
+    );
+  }
+  const events = Array.isArray(summary.events) ? summary.events.slice(-5) : [];
+  if (events.length) {
+    const items = events
+      .map((event) => {
+        const when = formatLogbookDate(event.time) || "";
+        return `<li>${escapeHtml(when)} - ${escapeHtml(
+          event.device_type || ""
+        )} ${escapeHtml(event.value ?? event.field ?? "")}</li>`;
+      })
+      .join("");
+    parts.push(`<div class="mt-2"><strong>Evenements recents</strong><ul class="mb-0">${items}</ul></div>`);
+  }
+  const images = Array.isArray(summary.images) ? summary.images : [];
+  if (images.length) {
+    const thumbs = images
+      .map(
+        (img) =>
+          `<button class="btn btn-sm btn-outline-light me-2 mb-2" data-ai-image-url="${img.url}" type="button">` +
+          `<img src="${img.thumbnail_url || img.url}" alt="${escapeHtml(
+            img.filename || "photo"
+          )}" style="max-width:80px; max-height:60px;"></button>`
+      )
+      .join("");
+    parts.push(`<div class="mt-2"><strong>Photos recentes</strong><div>${thumbs}</div></div>`);
+  }
+  container.innerHTML = parts.join("") || "Aucune donnee resume disponible.";
+}
+
+async function loadAiInsights() {
+  const list = document.getElementById("aiInsightsList");
+  if (list) list.textContent = "Chargement...";
+  try {
+    const res = await fetch("/api/ai/insights");
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.error || "Reponse invalide");
+    }
+    aiInsightsState = Array.isArray(data.insights) ? data.insights : [];
+    renderAiInsights(aiInsightsState);
+  } catch (err) {
+    console.error("loadAiInsights", err);
+    if (list) {
+      list.innerHTML = `<div class="alert alert-danger mb-0">Erreur insights IA: ${escapeHtml(
+        err.message
+      )}</div>`;
+    }
+  }
+}
+
+function renderAiInsights(insights) {
+  const list = document.getElementById("aiInsightsList");
+  if (!list) return;
+  if (!insights || insights.length === 0) {
+    list.innerHTML = '<div class="text-secondary">Aucun insight enregistre.</div>';
+    return;
+  }
+  const items = insights.slice(0, 10).map((insight) => {
+    const risk =
+      `<span class="badge ${insight.risk_level === "danger" ? "bg-danger" : "bg-info"}">${escapeHtml(
+        insight.risk_level || "info"
+      )}</span>`;
+    return `
+      <div class="border border-secondary-subtle rounded p-2 mb-2 bg-body-secondary bg-opacity-25">
+        <div class="d-flex justify-content-between align-items-center small">
+          <div class="fw-semibold">${escapeHtml(insight.source || "inconnu")}</div>
+          <div class="text-secondary">${escapeHtml(insight.mode || "")}</div>
+        </div>
+        <div class="small text-secondary">${escapeHtml(
+          formatLogbookDate(insight.created_at) || ""
+        )} ${risk}</div>
+        <div class="mt-1">${escapeHtml(insight.text || "")}</div>
+      </div>`;
+  });
+  list.innerHTML = items.join("");
+}
+
+function renderAiWorkerStatus(status) {
+  const badge = document.getElementById("aiWorkerStatusBadge");
+  const details = document.getElementById("aiWorkerStatusDetails");
+  const startBtn = document.querySelector("[data-action='aiWorkerStart']");
+  const stopBtn = document.querySelector("[data-action='aiWorkerStop']");
+  const running = status && status.running;
+  if (badge) {
+    badge.textContent = running ? "En cours" : "A l'arret";
+    badge.className = running ? "badge bg-success" : "badge bg-secondary-subtle text-dark";
+  }
+  if (details) {
+    if (!status) {
+      details.textContent = "Etat du worker indisponible.";
+    } else {
+      const started = status.started_at ? formatLogbookDate(status.started_at) : null;
+      const stopped = status.stopped_at ? formatLogbookDate(status.stopped_at) : null;
+      const lines = [];
+      if (running) {
+        lines.push(`PID ${status.pid || "?"}, demarrage ${started || "inconnu"}.`);
+      } else {
+        lines.push("Worker inactif.");
+        if (stopped) {
+          lines.push(`Arrete ${stopped} (code ${status.last_exit_code ?? "?"}).`);
+        }
+      }
+      if (status.log_path) {
+        lines.push(`Journal: ${status.log_path}`);
+      }
+      details.textContent = lines.join(" ");
+    }
+  }
+  if (startBtn) {
+    startBtn.disabled = !!running;
+  }
+  if (stopBtn) {
+    stopBtn.disabled = !running;
+  }
+}
+
+async function loadAiWorkerStatus(showLoading = false) {
+  const details = document.getElementById("aiWorkerStatusDetails");
+  if (details && showLoading) {
+    details.textContent = "Chargement...";
+  }
+  try {
+    const res = await fetch("/api/ai/worker/status");
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.error || "Reponse invalide");
+    }
+    aiWorkerStatusState = data.status || null;
+    renderAiWorkerStatus(aiWorkerStatusState);
+  } catch (err) {
+    console.error("loadAiWorkerStatus", err);
+    if (details) {
+      details.textContent = `Erreur etat worker: ${err.message}`;
+    }
+  }
+}
+
+async function startAiWorker() {
+  const btn = document.querySelector("[data-action='aiWorkerStart']");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/ai/worker/start", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    showToast("Worker IA demarre.", "success");
+  } catch (err) {
+    console.error("startAiWorker", err);
+    showToast(`Demarrage worker impossible: ${err.message}`, "danger");
+  } finally {
+    await loadAiWorkerStatus(true);
+  }
+}
+
+async function stopAiWorker() {
+  const btn = document.querySelector("[data-action='aiWorkerStop']");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/ai/worker/stop", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    showToast("Worker IA arrete.", "info");
+  } catch (err) {
+    console.error("stopAiWorker", err);
+    showToast(`Arret worker impossible: ${err.message}`, "danger");
+  } finally {
+    await loadAiWorkerStatus(true);
+  }
+}
+
 function applyPIDWater() {}
 
 function applyPIDRes() {}
@@ -591,6 +1133,7 @@ function applyStateToUI(state) {
   const phVal = state.ph ?? null;
   document.getElementById("ph_val").textContent =
     phVal !== null && phVal !== undefined ? phVal : "--.-";
+  updatePhCalibrationUi(state.ph_calibration, state.connected);
   const tempNames = state.temp_names || {};
   const tname = (k, d) => tempNames[k] || d;
   const mirrorLabel = (id, val) => {
@@ -1317,6 +1860,7 @@ const clickHandlers = {
   applyWater: () => applyWater(),
   applyRes: () => applyRes(),
   submitWaterQuality: () => submitWaterQuality(),
+  phCalibrate: (el) => handlePhCalibration(el),
   applyGlobalSpeed: () => applyGlobalSpeed(),
   editPumpName: (el) => enablePumpNameEdit(el.dataset.axis),
   pumpSave: (el) => savePumpConfig(el.dataset.axis),
@@ -1347,6 +1891,15 @@ const clickHandlers = {
   photoCategoryAdd: () => showPhotoCategoryInput(),
   photoCategoryCancel: () => hidePhotoCategoryInput(),
   photoCategorySave: (el) => submitPhotoCategory(el),
+  aiConfigSave: () => saveAiConfig(),
+  aiTestConnection: () => testAiConnection(),
+  aiGalleryRefresh: () => loadAiPhotoOptions(),
+  aiSendVisionPrompt: () => sendAiVisionRequest(),
+  aiSummaryRefresh: () => loadAiSummary(false),
+  aiInsightsRefresh: () => loadAiInsights(),
+  aiWorkerRefresh: () => loadAiWorkerStatus(true),
+  aiWorkerStart: () => startAiWorker(),
+  aiWorkerStop: () => stopAiWorker(),
 };
 
 const changeHandlers = {
@@ -1355,6 +1908,7 @@ const changeHandlers = {
   mtrAutoToggle: () => onMtrAutoChanged(),
   lightAuto: (target) => setLightAuto(target.value === "1"),
   heatMode: (target) => setHeatMode(target.checked),
+  aiModeChanged: () => onAiModeChanged(),
 };
 
 function initDelegates() {
@@ -2646,6 +3200,68 @@ function renderLogbookEntries(entries) {
   });
 }
 
+function escapeHtml(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatPhCalibrationTimestamp(ts) {
+  if (ts === undefined || ts === null) return "Jamais calibre";
+  try {
+    const date = new Date(Number(ts) * 1000);
+    if (Number.isNaN(date.getTime())) {
+      return "Date inconnue";
+    }
+    return date.toLocaleString();
+  } catch (err) {
+    return "Date inconnue";
+  }
+}
+
+function updatePhCalibrationUi(calibration, isConnected) {
+  const coeffs =
+    calibration && calibration.coefficients ? calibration.coefficients : {};
+  const slopeVal = Number(coeffs.slope);
+  const offsetVal = Number(coeffs.offset);
+  const slopeText = Number.isFinite(slopeVal) ? slopeVal.toFixed(3) : "--";
+  const offsetText = Number.isFinite(offsetVal) ? offsetVal.toFixed(3) : "--";
+  const summaryEl = document.getElementById("phCalSummary");
+  if (summaryEl) {
+    summaryEl.textContent = `Pente: ${slopeText} pH/V | Offset: ${offsetText}`;
+  }
+  const points =
+    calibration && calibration.points ? calibration.points : undefined;
+  PH_CAL_REFERENCES.forEach((ref) => {
+    const infoId = `phCalRef${ref.replace(".", "")}Info`;
+    const infoEl = document.getElementById(infoId);
+    const btn = document.querySelector(
+      `[data-action="phCalibrate"][data-ref="${ref}"]`
+    );
+    if (btn) {
+      btn.disabled = !isConnected;
+    }
+    if (!infoEl) return;
+    const meta = points ? points[ref] : null;
+    if (meta && meta.voltage !== undefined && meta.voltage !== null) {
+      const voltageVal = Number(meta.voltage);
+      const voltageText = Number.isFinite(voltageVal)
+        ? voltageVal.toFixed(3)
+        : meta.voltage;
+      const tsText = meta.updated_at
+        ? formatPhCalibrationTimestamp(meta.updated_at)
+        : "Date inconnue";
+      infoEl.textContent = `V=${voltageText} V (${tsText})`;
+    } else {
+      infoEl.textContent = "Pas encore calibre";
+    }
+  });
+}
+
 function formatLogbookDate(value) {
   if (!value) return "Date inconnue";
   try {
@@ -2738,12 +3354,50 @@ function hideMediaViewer() {
   mediaViewerContentEl.innerHTML = "";
 }
 
+function initAiModule() {
+  const picker = document.getElementById("aiPhotoPicker");
+  if (picker) {
+    picker.addEventListener("click", (event) => {
+      const target =
+        event.target instanceof Element
+          ? event.target.closest(".ai-photo-option")
+          : null;
+      if (!target) return;
+      const filename = target.getAttribute("data-photo-name");
+      toggleAiPhotoSelection(filename);
+    });
+  }
+  const summaryContainer = document.getElementById("aiSummaryContent");
+  if (summaryContainer) {
+    summaryContainer.addEventListener("click", (event) => {
+      const target =
+        event.target instanceof Element
+          ? event.target.closest("[data-ai-image-url]")
+          : null;
+      if (!target) return;
+      const url = target.getAttribute("data-ai-image-url");
+      if (url) {
+        openMediaViewer(url, "photos");
+      }
+    });
+  }
+  loadAiConfig();
+  loadAiSummary(true);
+  loadAiInsights();
+  loadAiPhotoOptions();
+  loadAiWorkerStatus(true);
+  if (!aiWorkerStatusTimer) {
+    aiWorkerStatusTimer = setInterval(() => loadAiWorkerStatus(false), 30000);
+  }
+}
+
 function init() {
   initDelegates();
   setupTabPersistence();
   initPopin();
   initCameraModule();
   initLogbookModule();
+  initAiModule();
   refreshPorts();
   refreshState();
   nextRefreshAt = Date.now() + refreshIntervalMs;

@@ -1,0 +1,8 @@
+{
+  "backend_url": "http://127.0.0.1:5000",
+  "analysis_period": "last_3_days",
+  "poll_interval_seconds": 1800,
+  "insight_source": "local_worker",
+  "risk_level": "info",
+  "prompt_template": "Tu es une IA qui surveille l'aquarium. Resume les informations ci-dessous et signale toute anomalie. JSON resume:\n{summary}"
+}
