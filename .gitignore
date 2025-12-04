@@ -1,3 +1,5 @@
 .vscode/sftp.json
 __pycache__/controller.cpython-312.pyc
 *.log
+*.pyc
+last_water_metrics.json

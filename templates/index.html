@@ -7,6 +7,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}" />
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet" />
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet" />
     <style>
         #refreshLoader {
@@ -128,10 +129,13 @@
                     <div class="col-md-4">
                         <div class="reef-card h-100">
                             <div class="d-flex justify-content-between align-items-center mb-2">
-                                <div class="fw-semibold">?? Lumière</div>
+                                <div class="fw-semibold">💡 Lumière</div>
                             </div>
                             <div class="light-value" id="lightLuxValue">-- lx</div>
                             <div class="text-secondary small">Capteur TSL2591</div>
+                            <iframe
+                                src="http://192.168.1.69:3000/d-solo/ad4p5f5/gnral?orgId=1&from=1764780515724&to=1764802115724&timezone=browser&refresh=5s&panelId=panel-15&__feature.dashboardSceneSolo=true"
+                                width="100%" height="220" frameborder="0"></iframe>
                         </div>
                     </div>
                     <div class="col-md-4">
@@ -175,13 +179,11 @@
                     </div>
                     <div class="reef-card mt-3">
                         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                            <div>
-                                <div class="fw-semibold mb-1">Analyse par Intelligence Artificielle</div>
-                                <small class="text-secondary">Retrouvez le module complet dans l'onglet <strong>Analyse
-                                        de l'eau</strong>.</small>
-                            </div>
-                            <button class="btn btn-sm btn-aqua" type="button" data-bs-toggle="tab"
-                                data-bs-target="#tab-water-analysis">Ouvrir l'onglet</button>
+
+                            <iframe
+                                src="http://192.168.1.69:3000/d-solo/ad4p5f5/gnral?orgId=1&timezone=browser&refresh=5s&panelId=panel-17&__feature.dashboardSceneSolo=true"
+                                width="100%" height="300" frameborder="0"></iframe>
+
                         </div>
                     </div>
                 </div>
@@ -237,6 +239,106 @@
                             <div id="logbookEntriesList" class="logbook-timeline"></div>
                         </div>
                     </div>
+                </div>
+                <div class="reef-card mt-3" id="livestockCatalogZone">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold mb-0">Catalogue Animal & Vegetal</div>
+                            <small class="text-secondary">Listez les introductions, sorties et effectifs de
+                                l'aquarium.</small>
+                        </div>
+                        <div class="d-flex align-items-center flex-wrap gap-2">
+                            <div class="text-secondary small">Double-cliquez sur une ligne pour afficher la fiche
+                                detaillee.</div>
+                            <button class="btn btn-sm btn-outline-light" type="button" data-action="livestockRefresh">
+                                Actualiser
+                            </button>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-2">
+                        <div class="col-xl-6">
+                            <div class="livestock-panel h-100">
+                                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
+                                    <div>
+                                        <div class="fw-semibold mb-0">Zone Animal</div>
+                                        <small class="text-secondary">Poissons, invertes et crustaces avec parametres
+                                            pH/KH/GH.</small>
+                                    </div>
+                                    <div class="livestock-panel-actions">
+                                        <span class="badge bg-secondary-subtle text-dark"
+                                            id="livestockAnimalActiveBadge">Actifs: 0</span>
+                                        <span class="badge bg-secondary-subtle text-dark"
+                                            id="livestockAnimalInactiveBadge">Sortis: 0</span>
+                                        <button class="btn btn-sm btn-aqua" type="button" data-action="livestockAdd"
+                                            data-category="animal">
+                                            <i class="bi bi-plus-circle"></i> Ajouter
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="table-responsive">
+                                    <table class="table table-sm align-middle livestock-table" data-category="animal">
+                                        <thead>
+                                            <tr>
+                                                <th style="width: 68px;">Photo</th>
+                                                <th>Espece</th>
+                                                <th style="width: 140px;">Introduit</th>
+                                                <th style="width: 90px;">Nombre</th>
+                                                <th style="width: 140px;">Sortie</th>
+                                                <th style="width: 110px;"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="livestockAnimalBody" data-category="animal">
+                                            <tr>
+                                                <td colspan="6" class="text-center text-secondary small py-3">Chargement
+                                                    du catalogue...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-xl-6">
+                            <div class="livestock-panel h-100">
+                                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
+                                    <div>
+                                        <div class="fw-semibold mb-0">Zone Vegetal</div>
+                                        <small class="text-secondary">Plantes aquatiques et algues.</small>
+                                    </div>
+                                    <div class="livestock-panel-actions">
+                                        <span class="badge bg-secondary-subtle text-dark"
+                                            id="livestockPlantActiveBadge">Actifs: 0</span>
+                                        <span class="badge bg-secondary-subtle text-dark"
+                                            id="livestockPlantInactiveBadge">Sortis: 0</span>
+                                        <button class="btn btn-sm btn-aqua" type="button" data-action="livestockAdd"
+                                            data-category="plant">
+                                            <i class="bi bi-plus-circle"></i> Ajouter
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="table-responsive">
+                                    <table class="table table-sm align-middle livestock-table" data-category="plant">
+                                        <thead>
+                                            <tr>
+                                                <th style="width: 68px;">Photo</th>
+                                                <th>Espece</th>
+                                                <th style="width: 140px;">Introduit</th>
+                                                <th style="width: 90px;">Nombre</th>
+                                                <th style="width: 140px;">Sortie</th>
+                                                <th style="width: 110px;"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="livestockPlantBody" data-category="plant">
+                                            <tr>
+                                                <td colspan="6" class="text-center text-secondary small py-3">Chargement
+                                                    du catalogue...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="livestockGlobalStatus" class="text-secondary small mt-2"></div>
                 </div>
             </div>
 
@@ -544,6 +646,7 @@
                         <button class="btn btn-sm btn-outline-light" data-action="readTemps">Rafraîchir</button>
                     </div>
                     <div class="row g-3">
+
                         <div class="col-md-4">
                             <div class="reef-stat">
                                 <div class="reef-stat-label">Tension sonde (0-5V)</div>
@@ -562,13 +665,7 @@
                                 <div class="reef-stat-value" id="ph_val">--.-</div>
                             </div>
                         </div>
-                        <div class="col-md-4">
-                            <div class="alert alert-secondary small mb-0">
-                                PH-4502C branché sur AUX-2 (A9). Aucune thermistance analogique raccordée (uniquement
-                                sondes DS18B20 pour les températures).
-                                : eau X-MIN (D3), air X-MAX (D2), Y-Min (D14), Y-Max (D15).
-                            </div>
-                        </div>
+
                     </div>
                     <div class="row g-3 mt-2">
                         <div class="col-md-6">
@@ -638,6 +735,21 @@
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+
+                <div class="reef-card mt-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold">Param&egrave;tres cibles du bac</div>
+                            <p class="text-secondary small mb-0">Synth&egrave;se des poissons actifs&nbsp;: min/max
+                                globaux, tranche de confort et mesure actuelle.</p>
+                        </div>
+                        <button class="btn btn-sm btn-outline-light" data-action="reloadWaterTargets">Rafra&icirc;chir
+                            les cibles</button>
+                    </div>
+                    <div id="waterTargetsContent" class="water-targets-content">
+                        <div class="text-secondary small">Chargement des param&egrave;tres...</div>
                     </div>
                 </div>
             </div>

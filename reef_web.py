@@ -1,6 +1,8 @@
 import atexit
 import base64
 import json
+import math
+import logging
 import subprocess
 import sys
 import threading
@@ -9,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 from uuid import uuid4
+from logging.handlers import RotatingFileHandler
 
 import requests
 from flask import (
@@ -50,6 +53,10 @@ BASE_DIR = Path(__file__).resolve().parent
 LOGBOOK_PATH = BASE_DIR / "logbook_entries.json"
 LOGBOOK_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_LOGBOOK_PHOTOS = 8
+LIVESTOCK_CATALOG_PATH = BASE_DIR / "livestock_catalog.json"
+LIVESTOCK_VALID_CATEGORIES = {"animal": "Animal", "plant": "Vegetal"}
+LIVESTOCK_WATER_FIELDS = ("ph", "kh", "gh", "temperature")
+LIVESTOCK_POPULATION_MEASUREMENT = "livestock_population"
 PHOTO_LABELS_PATH = BASE_DIR / "photo_labels.json"
 DEFAULT_PHOTO_CATEGORIES = ["Plante", "Produit", "Poisson"]
 AI_INSIGHTS_PATH = BASE_DIR / "ai_insights.json"
@@ -58,6 +65,40 @@ AI_IMAGE_SELECTION_LIMIT = 5
 AI_MAX_IMAGE_BYTES = 4 * 1024 * 1024
 AI_WORKER_SCRIPT = BASE_DIR / "llm" / "ai_worker_local.py"
 AI_WORKER_LOG = BASE_DIR / "ai_worker.log"
+AI_LOG_DIR = BASE_DIR / "logs"
+AI_COMFORT_LOG = AI_LOG_DIR / "ai_comfort.log"
+WATER_METRICS_PATH = BASE_DIR / "last_water_metrics.json"
+WATER_TARGET_METRICS = {
+    "ph": {
+        "label": "pH",
+        "unit": "",
+        "decimals": 1,
+        "default_min": 1.0,
+        "default_max": 14.0,
+        "scale_min": 1.0,
+        "scale_max": 14.0,
+    },
+    "temperature": {
+        "label": "Temperature",
+        "unit": "C",
+        "unit_prefix": "deg",
+        "decimals": 1,
+        "default_min": 0.0,
+        "default_max": 35.0,
+        "scale_min": 0.0,
+        "scale_max": 35.0,
+    },
+    "gh": {
+        "label": "GH",
+        "unit": "dH",
+        "unit_prefix": "deg",
+        "decimals": 1,
+        "default_min": 0.0,
+        "default_max": 30.0,
+        "scale_min": 0.0,
+        "scale_max": 30.0,
+    },
+}
 
 app = Flask(__name__)
 
@@ -166,6 +207,188 @@ def _serialize_log_entry(entry: Dict[str, object]) -> Dict[str, object]:
     }
 
 
+def _load_livestock_entries() -> List[Dict[str, Any]]:
+    if not LIVESTOCK_CATALOG_PATH.exists():
+        return []
+    try:
+        raw = json.loads(LIVESTOCK_CATALOG_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        app.logger.warning("Catalogue vivant corrompu, reinitialisation.")
+        return []
+    entries: List[Dict[str, Any]]
+    if isinstance(raw, dict):
+        entries = raw.get("entries") or []
+    else:
+        entries = raw
+    cleaned: List[Dict[str, Any]] = []
+    if not isinstance(entries, list):
+        return cleaned
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        category = str(entry.get("category") or "").lower()
+        if category not in LIVESTOCK_VALID_CATEGORIES:
+            continue
+        cleaned.append(entry)
+    return cleaned
+
+
+def _save_livestock_entries(entries: List[Dict[str, Any]]) -> None:
+    payload: Dict[str, Any] = {"entries": entries}
+    LIVESTOCK_CATALOG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _serialize_livestock_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    photo_name = entry.get("photo")
+    photo = None
+    if isinstance(photo_name, str) and photo_name:
+        photo = {
+            "filename": photo_name,
+            "url": url_for("camera_media", filename=photo_name),
+            "thumbnail_url": url_for("camera_media", filename=photo_name),
+        }
+    return {
+        "id": entry.get("id"),
+        "category": entry.get("category"),
+        "name": entry.get("name") or "",
+        "introduced_at": entry.get("introduced_at") or "",
+        "removed_at": entry.get("removed_at") or "",
+        "count": entry.get("count") or 0,
+        "photo": photo,
+        "created_at": entry.get("created_at"),
+        "updated_at": entry.get("updated_at"),
+        "ph_min": _serialize_float_field(entry.get("ph_min")),
+        "ph_max": _serialize_float_field(entry.get("ph_max")),
+        "kh_min": _serialize_float_field(entry.get("kh_min")),
+        "kh_max": _serialize_float_field(entry.get("kh_max")),
+        "gh_min": _serialize_float_field(entry.get("gh_min")),
+        "gh_max": _serialize_float_field(entry.get("gh_max")),
+        "temperature_min": _serialize_float_field(entry.get("temperature_min")),
+        "temperature_max": _serialize_float_field(entry.get("temperature_max")),
+        "resistance": (entry.get("resistance") or "").strip(),
+    }
+
+
+def _parse_livestock_count(raw_value: Any) -> int:
+    try:
+        value = int(str(raw_value).strip())
+    except (AttributeError, ValueError, TypeError):
+        value = 0
+    return max(0, value)
+
+
+def _parse_livestock_float(raw_value: Any) -> Optional[float]:
+    if raw_value is None:
+        return None
+    try:
+        if isinstance(raw_value, (int, float)):
+            value = float(raw_value)
+        else:
+            text = str(raw_value).strip()
+            if not text:
+                return None
+            text = text.replace(",", ".")
+            value = float(text)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _serialize_float_field(value: Any) -> Optional[float]:
+    try:
+        if isinstance(value, (int, float)):
+            num = float(value)
+        else:
+            num = float(str(value))
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(num):
+        return None
+    return num
+
+
+def _apply_livestock_water_params(entry: Dict[str, Any], form: Dict[str, Any]) -> None:
+    if entry.get("category") != "animal":
+        return
+    for field in LIVESTOCK_WATER_FIELDS:
+        entry[f"{field}_min"] = _parse_livestock_float(form.get(f"{field}_min"))
+        entry[f"{field}_max"] = _parse_livestock_float(form.get(f"{field}_max"))
+    entry["resistance"] = (form.get("resistance") or "").strip()
+
+
+def _coerce_entry_animal_count(entry: Optional[Dict[str, Any]]) -> int:
+    if not entry:
+        return 0
+    try:
+        return _parse_livestock_count(entry.get("count"))
+    except Exception:
+        return 0
+
+
+def _build_population_fields(action: str, entry: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    if action == "delete":
+        return {
+            "active_count": 0,
+            "archived_count": 0,
+            "total_count": 0,
+            "entry_count": 0,
+        }
+    if not entry or entry.get("category") != "animal":
+        return {
+            "active_count": 0,
+            "archived_count": 0,
+            "total_count": 0,
+            "entry_count": 0,
+        }
+    count = _coerce_entry_animal_count(entry)
+    # For deletions, consider the fishes archived even if removed_at was unset.
+    is_archived = bool(entry.get("removed_at")) or action == "delete"
+    active_count = 0 if is_archived else count
+    archived_count = count if is_archived else 0
+    return {
+        "active_count": active_count,
+        "archived_count": archived_count,
+        "total_count": count,
+        "entry_count": count,
+    }
+
+
+def _publish_animal_population(action: str, entry: Optional[Dict[str, Any]] = None) -> None:
+    telemetry = getattr(controller, "telemetry", None)
+    if not telemetry:
+        return
+    entry_name = ""
+    if entry:
+        try:
+            entry_name = str(entry.get("name") or "").strip()
+        except Exception:
+            entry_name = ""
+    try:
+        telemetry.emit(
+            measurement=LIVESTOCK_POPULATION_MEASUREMENT,
+            tags={
+                "event": action,
+                "category": "animal",
+                "entry_id": (entry or {}).get("id"),
+                "entry_name": entry_name or "inconnu",
+            },
+            fields=_build_population_fields(action, entry),
+        )
+    except Exception as exc:
+        app.logger.error("Impossible d'envoyer la population InfluxDB: %s", exc)
+
+
+def _find_livestock_entry(
+    entries: List[Dict[str, Any]], entry_id: str
+) -> Optional[Dict[str, Any]]:
+    for entry in entries:
+        if entry.get("id") == entry_id:
+            return entry
+    return None
+
+
 def _normalize_photo_categories(candidates: Any) -> List[str]:
     merged: List[str] = list(DEFAULT_PHOTO_CATEGORIES)
     if isinstance(candidates, list):
@@ -266,6 +489,71 @@ def _remove_photo_labels_for_files(filenames: Iterable[str]) -> None:
         _save_photo_label_data(data)
 
 
+def _delete_livestock_photo_file(filename: Optional[str]) -> None:
+    if not filename:
+        return
+    clean_name = str(filename or "").replace("\\", "/").strip()
+    if not clean_name:
+        return
+    base_dir = camera_manager.save_directory.resolve()
+    candidate = (camera_manager.save_directory / clean_name).resolve()
+    if not str(candidate).startswith(str(base_dir)):
+        return
+    try:
+        candidate.unlink(missing_ok=True)
+    except Exception as exc:
+        app.logger.warning("Suppression photo vivant impossible (%s): %s", clean_name, exc)
+        return
+    _remove_photo_labels_for_files([clean_name])
+
+
+def _load_last_water_metrics() -> Dict[str, Any]:
+    if not WATER_METRICS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(WATER_METRICS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if not isinstance(data.get("values"), dict):
+        data["values"] = {}
+    return data
+
+
+def _save_last_water_metrics(data: Dict[str, Any]) -> None:
+    safe = {
+        "recorded_at": data.get("recorded_at"),
+        "values": data.get("values", {}),
+    }
+    WATER_METRICS_PATH.write_text(json.dumps(safe, indent=2), encoding="utf-8")
+
+
+def _record_last_water_metrics(values: Dict[str, Any]) -> None:
+    allowed = ("no3", "no2", "gh", "kh", "cl2", "po4", "ph", "temperature")
+    sanitized: Dict[str, float] = {}
+    for key in allowed:
+        parsed = _parse_livestock_float(values.get(key))
+        if parsed is not None:
+            sanitized[key] = parsed
+    if not sanitized:
+        return
+    payload = {
+        "recorded_at": datetime.utcnow().isoformat() + "Z",
+        "values": sanitized,
+    }
+    try:
+        _save_last_water_metrics(payload)
+    except OSError as exc:
+        app.logger.warning("Enregistrement des mesures eau impossible: %s", exc)
+
+
+def _get_last_water_metric(key: str) -> Optional[float]:
+    data = _load_last_water_metrics()
+    values = data.get("values") or {}
+    return _parse_livestock_float(values.get(key))
+
+
 def _load_ai_insights() -> List[Dict[str, Any]]:
     if not AI_INSIGHTS_PATH.exists():
         return []
@@ -293,6 +581,101 @@ def _append_ai_insight(entry: Dict[str, Any]) -> Dict[str, Any]:
         insights = insights[:MAX_AI_INSIGHTS]
     _save_ai_insights(insights)
     return entry
+
+
+def _active_livestock_animals(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    active: List[Dict[str, Any]] = []
+    for entry in entries:
+        if entry.get("category") != "animal":
+            continue
+        if entry.get("removed_at"):
+            continue
+        if _coerce_entry_animal_count(entry) <= 0:
+            continue
+        active.append(entry)
+    return active
+
+
+def _compute_metric_payload(entries: List[Dict[str, Any]], metric: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    min_values: List[float] = []
+    max_values: List[float] = []
+    comfort_min_values: List[float] = []
+    comfort_max_values: List[float] = []
+    for entry in entries:
+        min_val = _serialize_float_field(entry.get(f"{metric}_min"))
+        max_val = _serialize_float_field(entry.get(f"{metric}_max"))
+        if min_val is not None:
+            min_values.append(min_val)
+        if max_val is not None:
+            max_values.append(max_val)
+        if min_val is not None and max_val is not None:
+            comfort_min_values.append(min_val)
+            comfort_max_values.append(max_val)
+    global_min = min(min_values) if min_values else None
+    global_max = max(max_values) if max_values else None
+    comfort_min = max(comfort_min_values) if comfort_min_values else None
+    comfort_max = min(comfort_max_values) if comfort_max_values else None
+    if comfort_min is not None and comfort_max is not None and comfort_min > comfort_max:
+        comfort_min = None
+        comfort_max = None
+    scale_min = global_min if global_min is not None else config.get("default_min", 0.0)
+    scale_max = global_max if global_max is not None else config.get("default_max", 1.0)
+    scale_min = config.get("scale_min", scale_min)
+    scale_max = config.get("scale_max", scale_max)
+    if scale_max <= scale_min:
+        span = max(abs(scale_min) * 0.2, 1.0)
+        scale_min -= span
+        scale_max += span
+    return {
+        "key": metric,
+        "label": config.get("label", metric),
+        "unit": config.get("unit", ""),
+        "unit_prefix": config.get("unit_prefix"),
+        "decimals": config.get("decimals", 1),
+        "min": global_min,
+        "max": global_max,
+        "comfort_min": comfort_min,
+        "comfort_max": comfort_max,
+        "scale_min": scale_min,
+        "scale_max": scale_max,
+        "current": None,
+    }
+
+
+def _pick_temperature_value(state: Dict[str, Any]) -> Optional[float]:
+    candidates = ("temp_2", "temp_1", "temp_3", "temp_4")
+    for key in candidates:
+        parsed = _parse_livestock_float(state.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _build_water_targets_payload() -> Dict[str, Any]:
+    all_entries = _load_livestock_entries()
+    entries = [entry for entry in all_entries if entry.get("category") == "animal"]
+    active_entries = _active_livestock_animals(entries)
+    metrics: List[Dict[str, Any]] = []
+    for key, config in WATER_TARGET_METRICS.items():
+        metrics.append(_compute_metric_payload(entries, key, config))
+    state = controller.get_state()
+    last_metrics = _load_last_water_metrics()
+    last_values = last_metrics.get("values", {})
+    state_values = {
+        "ph": _parse_livestock_float(state.get("ph")),
+        "temperature": _pick_temperature_value(state),
+        "gh": _parse_livestock_float(last_values.get("gh")),
+    }
+    for metric in metrics:
+        current = state_values.get(metric["key"])
+        if current is not None:
+            metric["current"] = current
+    return {
+        "ok": True,
+        "fish_count": len(active_entries),
+        "metrics": metrics,
+        "last_manual_record": last_metrics.get("recorded_at"),
+    }
 
 
 def _list_recent_photos(limit: int = 6) -> List[Dict[str, str]]:
@@ -342,6 +725,24 @@ _ai_worker_log_handle: Optional[Any] = None
 _ai_worker_last_start: Optional[datetime] = None
 _ai_worker_last_stop: Optional[datetime] = None
 _ai_worker_last_exit: Optional[int] = None
+_ai_comfort_logger: Optional[logging.Logger] = None
+
+
+def _get_ai_comfort_logger() -> logging.Logger:
+    global _ai_comfort_logger
+    if _ai_comfort_logger:
+        return _ai_comfort_logger
+    AI_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("reef.ai_comfort")
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(
+        AI_COMFORT_LOG, maxBytes=512 * 1024, backupCount=5, encoding="utf-8"
+    )
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    _ai_comfort_logger = logger
+    return logger
 
 
 def _ai_worker_script_path() -> Path:
@@ -477,6 +878,26 @@ def api_ports():
 def api_state():
 
     return jsonify(controller.get_state())
+
+
+
+
+
+@app.get("/api/water/targets")
+
+def api_water_targets():
+
+    try:
+
+        payload = _build_water_targets_payload()
+
+    except Exception as exc:
+
+        app.logger.exception("Impossible de calculer les cibles d'eau")
+
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify(payload)
 
 
 
@@ -657,6 +1078,7 @@ def api_action():
         elif action == "submit_water_quality":
 
             controller.submit_water_quality(params)
+            _record_last_water_metrics(params)
 
         elif action == "ph_calibrate":
 
@@ -1476,6 +1898,248 @@ def logbook_add_entry():
     return jsonify({"ok": True, "entry": _serialize_log_entry(entry)})
 
 
+def _sort_livestock_payload(items: List[Dict[str, Any]]) -> None:
+    def _key(item: Dict[str, Any]) -> str:
+        introduced = item.get("introduced_at") or ""
+        created = item.get("created_at") or ""
+        return f"{introduced}|{created}"
+
+    items.sort(key=_key, reverse=True)
+
+
+@app.get("/logbook/catalog")
+def logbook_catalog():
+    entries = _load_livestock_entries()
+    animals: List[Dict[str, Any]] = []
+    plants: List[Dict[str, Any]] = []
+    for entry in entries:
+        serialized = _serialize_livestock_entry(entry)
+        target = animals if entry.get("category") == "animal" else plants
+        target.append(serialized)
+    _sort_livestock_payload(animals)
+    _sort_livestock_payload(plants)
+    return jsonify({"ok": True, "animals": animals, "plants": plants})
+
+
+@app.post("/logbook/catalog")
+def logbook_catalog_add():
+    category = (request.form.get("category") or "").strip().lower()
+    if category not in LIVESTOCK_VALID_CATEGORIES:
+        return jsonify({"ok": False, "error": "Categorie invalide."}), 400
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "Nom de l'espece requis."}), 400
+    introduced_at = (request.form.get("introduced_at") or "").strip()
+    removed_at = (request.form.get("removed_at") or "").strip()
+    count = _parse_livestock_count(request.form.get("count"))
+    photo_name: Optional[str] = None
+    photo_file = request.files.get("photo")
+    if photo_file and photo_file.filename:
+        try:
+            photo_name = _store_logbook_photo(photo_file)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:  # pragma: no cover - unexpected IO failure
+            app.logger.exception("Enregistrement photo vivant impossible")
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    now = datetime.utcnow().isoformat() + "Z"
+    entry = {
+        "id": uuid4().hex,
+        "category": category,
+        "name": name,
+        "introduced_at": introduced_at,
+        "removed_at": removed_at,
+        "count": count,
+        "photo": photo_name,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _apply_livestock_water_params(entry, request.form)
+    entries = _load_livestock_entries()
+    entries.append(entry)
+    try:
+        _save_livestock_entries(entries)
+    except OSError as exc:
+        app.logger.error("Sauvegarde catalogue vivant impossible: %s", exc)
+        return (
+            jsonify({"ok": False, "error": "Ecriture sur disque impossible."}),
+            500,
+        )
+    _publish_animal_population("create", entry)
+    return jsonify(
+        {"ok": True, "entry": _serialize_livestock_entry(entry), "category": category}
+    )
+
+
+@app.put("/logbook/catalog/<entry_id>")
+def logbook_catalog_update(entry_id: str):
+    entries = _load_livestock_entries()
+    entry = _find_livestock_entry(entries, entry_id)
+    if not entry:
+        return jsonify({"ok": False, "error": "Entree introuvable."}), 404
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "Nom de l'espece requis."}), 400
+    introduced_at = (request.form.get("introduced_at") or "").strip()
+    removed_at = (request.form.get("removed_at") or "").strip()
+    count = _parse_livestock_count(request.form.get("count"))
+    photo_file = request.files.get("photo")
+    if photo_file and photo_file.filename:
+        try:
+            entry["photo"] = _store_logbook_photo(photo_file)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:  # pragma: no cover - unexpected IO failure
+            app.logger.exception("Mise a jour photo vivant impossible")
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    entry["name"] = name
+    entry["introduced_at"] = introduced_at
+    entry["removed_at"] = removed_at
+    entry["count"] = count
+    entry["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    _apply_livestock_water_params(entry, request.form)
+    try:
+        _save_livestock_entries(entries)
+    except OSError as exc:
+        app.logger.error("Sauvegarde catalogue vivant impossible: %s", exc)
+        return (
+            jsonify({"ok": False, "error": "Ecriture sur disque impossible."}),
+            500,
+        )
+    _publish_animal_population("update", entry)
+    return jsonify(
+        {
+            "ok": True,
+            "entry": _serialize_livestock_entry(entry),
+            "category": entry.get("category"),
+        }
+    )
+
+
+@app.delete("/logbook/catalog/<entry_id>")
+def logbook_catalog_delete(entry_id: str):
+    entries = _load_livestock_entries()
+    entry = _find_livestock_entry(entries, entry_id)
+    if not entry:
+        return jsonify({"ok": False, "error": "Entree introuvable."}), 404
+    updated_entries = [item for item in entries if item.get("id") != entry_id]
+    photo_name = entry.get("photo")
+    try:
+        _save_livestock_entries(updated_entries)
+    except OSError as exc:
+        app.logger.error("Suppression catalogue vivant impossible: %s", exc)
+        return (
+            jsonify({"ok": False, "error": "Ecriture sur disque impossible."}),
+            500,
+        )
+    _publish_animal_population("delete", entry)
+    _delete_livestock_photo_file(photo_name)
+    return jsonify(
+        {"ok": True, "entry_id": entry_id, "category": entry.get("category")}
+    )
+
+
+def _build_animal_comfort_prompt(species_name: str) -> List[Dict[str, str]]:
+    instructions = (
+        "Tu es un expert en aquariophilie. Utilise exclusivement les informations figurant sur le site https://fr.aqua-fish.net/poissons/ "
+        "pour repondre. Fournis uniquement un JSON compact avec ce schema:\n"
+        '{\n'
+        '  "ph": {"min": nombre ou null, "max": nombre ou null},\n'
+        '  "kh": {"min": nombre ou null, "max": nombre ou null},\n'
+        '  "gh": {"min": nombre ou null, "max": nombre ou null},\n'
+        '  "temperature": {"min": nombre ou null, "max": nombre ou null},\n'
+        '  "resistance": "texte court (par ex. Faible/Moyenne/Elevee)"\n'
+        "}\n"
+        "Utilise un point comme separateur decimal et indique les valeurs habituelles"
+        " observees en captivite. Si l'information est inconnue, utilise null."
+    )
+    user_prompt = (
+        f"Espece concernee: {species_name}.\n"
+        "Releve les informations exactes presentes sur la fiche correspondante du site https://fr.aqua-fish.net/poissons/ "
+        "pour donner les plages de confort en aquarium communautaire tropical."
+    )
+    return [
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _parse_comfort_json(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Payload IA invalide.")
+    flattened: Dict[str, Any] = {}
+    for field in LIVESTOCK_WATER_FIELDS:
+        raw = payload.get(field)
+        if isinstance(raw, dict):
+            flattened[f"{field}_min"] = _parse_livestock_float(raw.get("min"))
+            flattened[f"{field}_max"] = _parse_livestock_float(raw.get("max"))
+        else:
+            flattened[f"{field}_min"] = None
+            flattened[f"{field}_max"] = None
+    resistance = payload.get("resistance")
+    flattened["resistance"] = str(resistance).strip() if isinstance(resistance, str) else ""
+    return flattened
+
+
+def _strip_code_fences(raw: str) -> str:
+    if not isinstance(raw, str):
+        return ""
+    content = raw.strip()
+    if content.startswith("```"):
+        first_newline = content.find("\n")
+        if first_newline != -1:
+            content = content[first_newline + 1 :]
+        content = content.strip()
+        if content.endswith("```"):
+            content = content[: -3].strip()
+    return content
+
+
+@app.post("/logbook/catalog/comfort")
+def logbook_catalog_comfort():
+    payload = request.get_json(force=True) or {}
+    name = (payload.get("name") or "").strip()
+    category = (payload.get("category") or "").strip().lower() or "animal"
+    if category != "animal":
+        return jsonify({"ok": False, "error": "Support limite aux fiches animales."}), 400
+    if not name:
+        return jsonify({"ok": False, "error": "Nom de l'espece requis."}), 400
+    logger = _get_ai_comfort_logger()
+    try:
+        messages = _build_animal_comfort_prompt(name)
+        logger.info("[INFO] espece=%s request=%s", name, json.dumps(messages, ensure_ascii=False))
+        result = call_llm(messages, temperature=0.2, max_tokens=400)
+        content = result.get("content") or ""
+        logger.info("[INFO] espece=%s response=%s", name, content)
+        cleaned_content = _strip_code_fences(content)
+        data = json.loads(cleaned_content)
+        flattened = _parse_comfort_json(data)
+        logger.info("[SUCCES] espece=%s ranges=%s", name, json.dumps(flattened, ensure_ascii=False))
+    except RuntimeError as exc:
+        if str(exc) == ANALYSIS_KEY_MISSING_ERROR:
+            logger.error("[ERROR] espece=%s code=%s message=%s", name, ANALYSIS_KEY_MISSING_ERROR, exc)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "Cle API OpenAI manquante.",
+                        "error_code": ANALYSIS_KEY_MISSING_ERROR,
+                    }
+                ),
+                400,
+            )
+        logger.error("[ERROR] espece=%s type=runtime message=%s", name, exc)
+        app.logger.error("AI comfort lookup failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    except json.JSONDecodeError as exc:
+        logger.error("[ERROR] espece=%s type=json message=%s", name, exc)
+        app.logger.error("AI comfort payload invalide: %s", exc)
+        return jsonify({"ok": False, "error": "Reponse IA invalide."}), 502
+    except ValueError as exc:
+        logger.error("[ERROR] espece=%s type=parse message=%s", name, exc)
+        app.logger.error("AI comfort parsing failed: %s", exc)
+        return jsonify({"ok": False, "error": "Reponse IA invalide."}), 502
+    return jsonify({"ok": True, "ranges": flattened})
 
 
 PERIOD_ALIASES = {

@@ -45,6 +45,17 @@ let cameraLiveImageEl = null;
 let cameraLiveOverlayEl = null;
 let logbookEntriesCache = [];
 let logbookEmptyText = "";
+const LIVESTOCK_CATEGORY_LABELS = { animal: "Animal", plant: "Vegetal" };
+const LIVESTOCK_COLUMN_COUNT = 6;
+const LIVESTOCK_PARAM_FIELDS = [
+  { key: "ph", label: "pH", step: "0.1" },
+  { key: "kh", label: "KH", step: "0.5" },
+  { key: "gh", label: "GH", step: "0.5" },
+  { key: "temperature", label: "Température (°C)", step: "0.5" },
+];
+const livestockCatalogState = { animals: [], plants: [] };
+let livestockEditContext = null;
+const livestockPreviewUrls = new Map();
 let esp32CamConfig = { url: "" };
 let esp32CamSettings = null;
 let esp32CamPreviewUrl = null;
@@ -55,6 +66,14 @@ const photoLabelsState = {
   labels: {},
   loaded: false,
   loadingPromise: null,
+};
+const waterTargetsState = {
+  metrics: [],
+  metricMap: new Map(),
+  dom: {},
+  loading: false,
+  error: null,
+  fishCount: 0,
 };
 const ANALYSIS_PERIOD_LABELS = {
   last_3_days: "0 à -3 jours",
@@ -185,7 +204,280 @@ function submitWaterQuality() {
     showToast("Aucune donnée fournie pour la qualité d'eau.", "warning");
     return;
   }
-  apiAction("submit_water_quality", params);
+  apiAction("submit_water_quality", params)
+    .then(() => loadWaterTargets(true))
+    .catch(() => {});
+}
+
+
+function waterTargetsContainer() {
+  return document.getElementById("waterTargetsContent");
+}
+
+function setWaterTargetsMessage(message, tone = "secondary") {
+  const container = waterTargetsContainer();
+  if (!container) return;
+  container.innerHTML = `<div class="text-${tone} small">${message}</div>`;
+}
+
+function formatWaterUnit(metric) {
+  if (!metric || !metric.unit) return "";
+  if (metric.unit_prefix === "deg") {
+    return `°${metric.unit}`;
+  }
+  return metric.unit;
+}
+
+function formatWaterValue(value, metric) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+    return "--";
+  }
+  const decimals = typeof metric.decimals === "number" ? metric.decimals : 1;
+  const formatted = Number(value).toFixed(decimals);
+  const unit = formatWaterUnit(metric);
+  return unit ? `${formatted} ${unit}` : formatted;
+}
+
+function waterMetricPercent(metric, value) {
+  if (value === null || value === undefined) return null;
+  const min = Number(metric.scale_min);
+  const max = Number(metric.scale_max);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null;
+  const percent = ((Number(value) - min) / (max - min)) * 100;
+  return Math.max(0, Math.min(100, percent));
+}
+
+async function loadWaterTargets(force = false) {
+  if (waterTargetsState.loading && !force) {
+    return;
+  }
+  const container = waterTargetsContainer();
+  if (!container) return;
+  if (!waterTargetsState.metrics.length || force) {
+    setWaterTargetsMessage(
+      force ? "Actualisation des paramètres en cours..." : "Chargement des paramètres...",
+      "secondary"
+    );
+  }
+  waterTargetsState.loading = true;
+  try {
+    const res = await fetch("/api/water/targets");
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    const metrics = Array.isArray(data.metrics) ? data.metrics : [];
+    waterTargetsState.metrics = metrics;
+    waterTargetsState.metricMap = new Map(metrics.map((m) => [m.key, m]));
+    waterTargetsState.fishCount = data.fish_count || 0;
+    waterTargetsState.error = null;
+    renderWaterTargets();
+  } catch (err) {
+    console.error("loadWaterTargets", err);
+    waterTargetsState.error = err.message;
+    setWaterTargetsMessage(`Impossible de charger les cibles: ${err.message}`, "danger");
+  } finally {
+    waterTargetsState.loading = false;
+  }
+}
+
+function renderWaterTargets() {
+  const container = waterTargetsContainer();
+  if (!container) return;
+  container.innerHTML = "";
+  waterTargetsState.dom = {};
+  const metrics = waterTargetsState.metrics || [];
+  if (!metrics.length) {
+    const message =
+      waterTargetsState.fishCount > 0
+        ? "Aucun intervalle exploitable pour le moment."
+        : "Ajoutez des poissons actifs pour calculer les cibles.";
+    setWaterTargetsMessage(message, "secondary");
+    return;
+  }
+  metrics.forEach((metric) => {
+    const row = buildWaterTargetRow(metric);
+    container.appendChild(row);
+    updateWaterTargetCurrentView(metric);
+  });
+}
+
+function buildWaterTargetRow(metric) {
+  const row = document.createElement("div");
+  row.className = "water-target-row";
+
+  const label = document.createElement("div");
+  label.className = "water-target-label";
+  label.textContent = metric.label || metric.key;
+  row.appendChild(label);
+
+  const content = document.createElement("div");
+  content.className = "water-target-body";
+
+  const bar = document.createElement("div");
+  bar.className = `water-target-bar water-target-bar-${metric.key}`;
+
+  if (metric.comfort_min !== null && metric.comfort_min !== undefined && metric.comfort_max !== null && metric.comfort_max !== undefined) {
+    const minPercent = waterMetricPercent(metric, metric.comfort_min);
+    const maxPercent = waterMetricPercent(metric, metric.comfort_max);
+    if (minPercent !== null && maxPercent !== null) {
+      const comfort = document.createElement("div");
+      comfort.className = "water-target-comfort";
+      const left = Math.min(minPercent, maxPercent);
+      const width = Math.abs(maxPercent - minPercent);
+      comfort.style.left = `${left}%`;
+      comfort.style.width = `${Math.max(0.5, width)}%`;
+      bar.appendChild(comfort);
+    }
+  }
+
+  const minMarker = appendWaterMarker(
+    bar,
+    "water-target-marker marker-extreme",
+    waterMetricPercent(metric, metric.min),
+    metric.min !== null && metric.min !== undefined ? `Minimum global: ${formatWaterValue(metric.min, metric)}` : ""
+  );
+  const maxMarker = appendWaterMarker(
+    bar,
+    "water-target-marker marker-extreme",
+    waterMetricPercent(metric, metric.max),
+    metric.max !== null && metric.max !== undefined ? `Maximum global: ${formatWaterValue(metric.max, metric)}` : ""
+  );
+  const comfortMinMarker = appendWaterMarker(
+    bar,
+    "water-target-marker marker-comfort",
+    waterMetricPercent(metric, metric.comfort_min),
+    metric.comfort_min !== null && metric.comfort_min !== undefined
+      ? `Zone confort (min): ${formatWaterValue(metric.comfort_min, metric)}`
+      : ""
+  );
+  const comfortMaxMarker = appendWaterMarker(
+    bar,
+    "water-target-marker marker-comfort",
+    waterMetricPercent(metric, metric.comfort_max),
+    metric.comfort_max !== null && metric.comfort_max !== undefined
+      ? `Zone confort (max): ${formatWaterValue(metric.comfort_max, metric)}`
+      : ""
+  );
+  const currentMarker = appendWaterMarker(
+    bar,
+    "water-target-marker marker-current",
+    waterMetricPercent(metric, metric.current),
+    metric.current !== null && metric.current !== undefined ? `Valeur actuelle: ${formatWaterValue(metric.current, metric)}` : ""
+  );
+
+  content.appendChild(bar);
+
+  const legend = document.createElement("div");
+  legend.className = "water-target-legend";
+  const legendItems = [
+    { label: "Min", value: metric.min },
+    { label: "Confort", value: metric.comfort_min !== null && metric.comfort_max !== null ? `${formatWaterValue(metric.comfort_min, metric)} – ${formatWaterValue(metric.comfort_max, metric)}` : "--" },
+    { label: "Max", value: metric.max },
+  ];
+  legendItems.forEach((item) => {
+    const block = document.createElement("div");
+    block.className = "water-target-legend-item";
+    const spanLabel = document.createElement("span");
+    spanLabel.className = "legend-label";
+    spanLabel.textContent = `${item.label}: `;
+    const spanValue = document.createElement("span");
+    spanValue.className = "legend-value";
+    spanValue.textContent =
+      typeof item.value === "string" ? item.value : formatWaterValue(item.value, metric);
+    block.appendChild(spanLabel);
+    block.appendChild(spanValue);
+    legend.appendChild(block);
+  });
+  const currentBlock = document.createElement("div");
+  currentBlock.className = "water-target-legend-item";
+  const currentLabel = document.createElement("span");
+  currentLabel.className = "legend-label";
+  currentLabel.textContent = "Actuel: ";
+  const currentValueEl = document.createElement("span");
+  currentValueEl.className = "legend-value";
+  currentValueEl.textContent = formatWaterValue(metric.current, metric);
+  currentBlock.appendChild(currentLabel);
+  currentBlock.appendChild(currentValueEl);
+  legend.appendChild(currentBlock);
+
+  content.appendChild(legend);
+  row.appendChild(content);
+
+  waterTargetsState.dom[metric.key] = {
+    currentMarker,
+    currentValue: currentValueEl,
+    minMarker,
+    maxMarker,
+    comfortMinMarker,
+    comfortMaxMarker,
+  };
+  return row;
+}
+
+function appendWaterMarker(bar, className, percent, title) {
+  const marker = document.createElement("div");
+  marker.className = className;
+  if (percent === null || percent === undefined) {
+    marker.classList.add("d-none");
+  } else {
+    marker.style.left = `${percent}%`;
+  }
+  if (title) {
+    marker.title = title;
+  }
+  bar.appendChild(marker);
+  return marker;
+}
+
+function updateWaterTargetCurrentView(metric) {
+  const dom = waterTargetsState.dom[metric.key];
+  if (!dom) return;
+  const percent = waterMetricPercent(metric, metric.current);
+  if (percent === null || percent === undefined) {
+    dom.currentMarker.classList.add("d-none");
+  } else {
+    dom.currentMarker.classList.remove("d-none");
+    dom.currentMarker.style.left = `${percent}%`;
+    dom.currentMarker.title = `Valeur actuelle: ${formatWaterValue(metric.current, metric)}`;
+  }
+  if (dom.currentValue) {
+    dom.currentValue.textContent = formatWaterValue(metric.current, metric);
+  }
+}
+
+function setWaterTargetCurrentValue(key, value) {
+  if (value === null || value === undefined) return;
+  if (!Number.isFinite(Number(value))) return;
+  const metric = waterTargetsState.metricMap.get(key);
+  if (!metric) return;
+  metric.current = Number(value);
+  updateWaterTargetCurrentView(metric);
+}
+
+function readTemperatureFromState(state) {
+  const keys = ["temp_2", "temp_1", "temp_3", "temp_4"];
+  for (const key of keys) {
+    const val = Number(state[key]);
+    if (Number.isFinite(val)) {
+      return val;
+    }
+  }
+  return null;
+}
+
+function updateWaterTargetsCurrent(state) {
+  if (!waterTargetsState.metricMap.size) return;
+  if (state && state.ph !== undefined) {
+    const phValue = Number(state.ph);
+    if (Number.isFinite(phValue)) {
+      setWaterTargetCurrentValue("ph", phValue);
+    }
+  }
+  const tempValue = state ? readTemperatureFromState(state) : null;
+  if (tempValue !== null) {
+    setWaterTargetCurrentValue("temperature", tempValue);
+  }
 }
 
 async function handlePhCalibration(el) {
@@ -1152,6 +1444,7 @@ function applyStateToUI(state) {
   };
   mirrorVal("temp2_val2", state.temp_2);
   mirrorVal("temp4_val2", state.temp_4);
+  updateWaterTargetsCurrent(state);
   const pumpLabel = document.getElementById("pumpStateLabel");
   const pumpBtn = document.getElementById("pumpToggleBtn");
   const pumpIcon = document.getElementById("pumpIcon");
@@ -1860,6 +2153,7 @@ const clickHandlers = {
   applyWater: () => applyWater(),
   applyRes: () => applyRes(),
   submitWaterQuality: () => submitWaterQuality(),
+  reloadWaterTargets: () => loadWaterTargets(true),
   phCalibrate: (el) => handlePhCalibration(el),
   applyGlobalSpeed: () => applyGlobalSpeed(),
   editPumpName: (el) => enablePumpNameEdit(el.dataset.axis),
@@ -1888,6 +2182,13 @@ const clickHandlers = {
   logbookSubmit: () => submitLogbookEntry(),
   logbookRefresh: () => loadLogbookEntries(),
   logbookReset: () => resetLogbookForm(),
+  livestockAdd: (el) => startLivestockCreate(el.dataset.category),
+  livestockEdit: (el) => startLivestockEdit(el.dataset.category, el.dataset.entryId),
+  livestockCancelEdit: () => cancelLivestockEdit(),
+  livestockSave: (el) => saveLivestockEntry(el),
+  livestockRefresh: () => loadLivestockCatalog(),
+  livestockDelete: (el) => deleteLivestockEntry(el),
+  livestockFetchComfort: (el) => fetchLivestockComfort(el),
   photoCategoryAdd: () => showPhotoCategoryInput(),
   photoCategoryCancel: () => hidePhotoCategoryInput(),
   photoCategorySave: (el) => submitPhotoCategory(el),
@@ -3303,6 +3604,857 @@ function initLogbookModule() {
   loadLogbookEntries(false);
 }
 
+function formatLivestockDate(value) {
+  if (!value) return "—";
+  try {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleDateString();
+    }
+  } catch (err) {
+    // ignore parse errors
+  }
+  if (typeof value === "string" && value.length >= 10) {
+    return value.slice(0, 10);
+  }
+  return value;
+}
+
+function toLivestockDateInput(value) {
+  if (!value) return "";
+  try {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toISOString().slice(0, 10);
+    }
+  } catch (err) {
+    // ignore parse errors
+  }
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+    return value.slice(0, 10);
+  }
+  return "";
+}
+
+function getLivestockArray(category) {
+  return category === "plant"
+    ? livestockCatalogState.plants
+    : livestockCatalogState.animals;
+}
+
+function getLivestockBody(category) {
+  const id = category === "plant" ? "livestockPlantBody" : "livestockAnimalBody";
+  return document.getElementById(id);
+}
+
+function getLivestockDomKey(category) {
+  return category === "plant" ? "Plant" : "Animal";
+}
+
+function getLivestockRowKey(category, entryId) {
+  return entryId ? `${category}-${entryId}` : `draft-${category}`;
+}
+
+function toLivestockNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function formatLivestockNumber(value) {
+  const num = toLivestockNumber(value);
+  if (num === null) return "";
+  return Number.isInteger(num) ? `${num}` : num.toFixed(1);
+}
+
+function formatLivestockRangeLabel(label, minValue, maxValue) {
+  const min = toLivestockNumber(minValue);
+  const max = toLivestockNumber(maxValue);
+  if (min === null && max === null) return "";
+  const minText = min === null ? null : formatLivestockNumber(min);
+  const maxText = max === null ? null : formatLivestockNumber(max);
+  if (minText && maxText) {
+    return `${label} ${minText}-${maxText}`;
+  }
+  if (minText) {
+    return `${label} ≥${minText}`;
+  }
+  if (maxText) {
+    return `${label} ≤${maxText}`;
+  }
+  return "";
+}
+
+function buildLivestockParamSummary(entry) {
+  if (!entry || entry.category !== "animal") return "";
+  const parts = [];
+  LIVESTOCK_PARAM_FIELDS.forEach(({ key, label }) => {
+    const summary = formatLivestockRangeLabel(label, entry[`${key}_min`], entry[`${key}_max`]);
+    if (summary) {
+      parts.push(summary);
+    }
+  });
+  if (entry.resistance) {
+    parts.push(`Resistance ${entry.resistance}`);
+  }
+  return parts.join(" | ");
+}
+
+function setLivestockRangeInputValue(input, value) {
+  if (!input) return;
+  const num = toLivestockNumber(value);
+  if (num === null) {
+    input.value = "";
+    return;
+  }
+  input.value = `${num}`;
+}
+
+function applyComfortRangesToInputs(row, ranges) {
+  if (!row || !ranges) return;
+  LIVESTOCK_PARAM_FIELDS.forEach(({ key }) => {
+    setLivestockRangeInputValue(
+      row.querySelector(`.livestock-input-${key}-min`),
+      ranges[`${key}_min`]
+    );
+    setLivestockRangeInputValue(
+      row.querySelector(`.livestock-input-${key}-max`),
+      ranges[`${key}_max`]
+    );
+  });
+  const resInput = row.querySelector(".livestock-input-resistance");
+  if (resInput) {
+    const resistanceValue =
+      typeof ranges.resistance === "string" ? ranges.resistance.trim() : "";
+    resInput.value = resistanceValue;
+  }
+}
+
+function setLivestockStatus(message = "", tone = "secondary") {
+  const el = document.getElementById("livestockGlobalStatus");
+  if (!el) return;
+  ["text-secondary", "text-success", "text-danger"].forEach((cls) =>
+    el.classList.remove(cls)
+  );
+  let className = "text-secondary";
+  if (tone === "success") {
+    className = "text-success";
+  } else if (tone === "danger") {
+    className = "text-danger";
+  }
+  el.classList.add(className);
+  el.textContent = message || "";
+}
+
+function setLivestockLoading(category, message) {
+  const body = getLivestockBody(category);
+  if (!body) return;
+  body.innerHTML = "";
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = LIVESTOCK_COLUMN_COUNT;
+  td.className = "text-center text-secondary small py-3";
+  td.textContent = message;
+  tr.appendChild(td);
+  body.appendChild(tr);
+}
+
+function buildLivestockEmptyRow(category) {
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = LIVESTOCK_COLUMN_COUNT;
+  td.className = "text-center text-secondary small py-3";
+  td.textContent =
+    category === "plant"
+      ? "Aucune plante enregistree."
+      : "Aucun animal enregistre.";
+  tr.appendChild(td);
+  return tr;
+}
+
+function buildLivestockViewRow(entry, category) {
+  const tr = document.createElement("tr");
+  tr.dataset.livestockRow = "view";
+  tr.dataset.entryId = entry.id || "";
+  tr.dataset.category = category;
+  tr.dataset.rowKey = getLivestockRowKey(category, entry.id || "");
+  tr.title = "Double-cliquez pour ouvrir la fiche detaillee";
+
+  const thumbTd = document.createElement("td");
+  const thumb = document.createElement("div");
+  thumb.className = "livestock-thumb";
+  if (entry.photo && entry.photo.thumbnail_url) {
+    const img = document.createElement("img");
+    img.src = entry.photo.thumbnail_url;
+    img.alt = entry.photo.filename || entry.name || "Photo";
+    thumb.appendChild(img);
+  } else {
+    thumb.textContent = "Photo";
+  }
+  thumbTd.appendChild(thumb);
+  tr.appendChild(thumbTd);
+
+  const speciesTd = document.createElement("td");
+  const nameEl = document.createElement("div");
+  nameEl.className = "livestock-species";
+  nameEl.textContent = entry.name || "Sans nom";
+  speciesTd.appendChild(nameEl);
+  const statusEl = document.createElement("div");
+  statusEl.className = "livestock-subtext";
+  const badge = document.createElement("span");
+  badge.className = `livestock-status-badge ${
+    entry.removed_at ? "livestock-status-archived" : "livestock-status-active"
+  }`;
+  badge.textContent = entry.removed_at ? "Sorti" : "Actif";
+  statusEl.appendChild(badge);
+  speciesTd.appendChild(statusEl);
+  if (category === "animal") {
+    const summaryText = buildLivestockParamSummary(entry);
+    if (summaryText) {
+      const paramsEl = document.createElement("div");
+      paramsEl.className = "livestock-param-summary";
+      paramsEl.textContent = summaryText;
+      speciesTd.appendChild(paramsEl);
+    }
+  }
+  tr.appendChild(speciesTd);
+
+  const introTd = document.createElement("td");
+  introTd.textContent = formatLivestockDate(entry.introduced_at);
+  tr.appendChild(introTd);
+
+  const countTd = document.createElement("td");
+  const countValue = Number.isFinite(Number(entry.count))
+    ? Number(entry.count)
+    : entry.count || 0;
+  countTd.textContent = countValue;
+  tr.appendChild(countTd);
+
+  const removedTd = document.createElement("td");
+  removedTd.textContent = formatLivestockDate(entry.removed_at);
+  tr.appendChild(removedTd);
+
+  const actionsTd = document.createElement("td");
+  actionsTd.className = "text-end";
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "btn btn-outline-light btn-sm";
+  editBtn.dataset.action = "livestockEdit";
+  editBtn.dataset.entryId = entry.id;
+  editBtn.dataset.category = category;
+  editBtn.innerHTML = '<i class="bi bi-pencil-square"></i>';
+  actionsTd.appendChild(editBtn);
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "btn btn-outline-danger btn-sm ms-2";
+  deleteBtn.dataset.action = "livestockDelete";
+  deleteBtn.dataset.entryId = entry.id;
+  deleteBtn.dataset.category = category;
+  deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+  actionsTd.appendChild(deleteBtn);
+  tr.appendChild(actionsTd);
+
+  return tr;
+}
+
+function buildAnimalParamEditor(entry) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "livestock-animal-editor mt-2";
+  const header = document.createElement("div");
+  header.className = "livestock-animal-editor-header";
+  const title = document.createElement("span");
+  title.className = "fw-semibold";
+  title.textContent = "Parametres eau";
+  const aiBtn = document.createElement("button");
+  aiBtn.type = "button";
+  aiBtn.className = "btn btn-outline-light btn-sm ms-auto";
+  aiBtn.dataset.action = "livestockFetchComfort";
+  aiBtn.innerHTML = '<i class="bi bi-stars me-1"></i>Auto (IA)';
+  header.appendChild(title);
+  header.appendChild(aiBtn);
+  wrapper.appendChild(header);
+  const grid = document.createElement("div");
+  grid.className = "livestock-animal-editor-grid";
+  LIVESTOCK_PARAM_FIELDS.forEach(({ key, label, step }) => {
+    const row = document.createElement("div");
+    row.className = "livestock-param-row";
+    const labelEl = document.createElement("span");
+    labelEl.className = "livestock-param-label";
+    labelEl.textContent = label;
+    row.appendChild(labelEl);
+    const group = document.createElement("div");
+    group.className = "input-group input-group-sm livestock-param-inputs";
+    const minInput = document.createElement("input");
+    minInput.type = "number";
+    minInput.step = step;
+    minInput.className = `form-control livestock-input-${key}-min`;
+    minInput.placeholder = "Min";
+    setLivestockRangeInputValue(minInput, entry ? entry[`${key}_min`] : "");
+    group.appendChild(minInput);
+    const sep = document.createElement("span");
+    sep.className = "input-group-text";
+    sep.textContent = "à";
+    group.appendChild(sep);
+    const maxInput = document.createElement("input");
+    maxInput.type = "number";
+    maxInput.step = step;
+    maxInput.className = `form-control livestock-input-${key}-max`;
+    maxInput.placeholder = "Max";
+    setLivestockRangeInputValue(maxInput, entry ? entry[`${key}_max`] : "");
+    group.appendChild(maxInput);
+    row.appendChild(group);
+    grid.appendChild(row);
+  });
+  wrapper.appendChild(grid);
+  const resistanceGroup = document.createElement("div");
+  resistanceGroup.className = "mt-2";
+  const resistanceLabel = document.createElement("label");
+  resistanceLabel.className = "form-label form-label-sm mb-1";
+  resistanceLabel.textContent = "Resistance (fragile, robuste, etc.)";
+  resistanceGroup.appendChild(resistanceLabel);
+  const resistanceInput = document.createElement("input");
+  resistanceInput.type = "text";
+  resistanceInput.className = "form-control form-control-sm livestock-input-resistance";
+  resistanceInput.placeholder = "Ex: Faible, Moyenne, Elevee";
+  resistanceInput.value = entry && entry.resistance ? entry.resistance : "";
+  resistanceGroup.appendChild(resistanceInput);
+  wrapper.appendChild(resistanceGroup);
+  const note = document.createElement("div");
+  note.className = "text-secondary small mt-1";
+  note.textContent =
+    "Precisez les plages min/max pour l'eau ou utilisez l'assistant IA.";
+  wrapper.appendChild(note);
+  return wrapper;
+}
+
+function buildLivestockEditRow(entry, category) {
+  const tr = document.createElement("tr");
+  tr.className = "livestock-edit-row";
+  tr.dataset.livestockRow = "edit";
+  tr.dataset.category = category;
+  tr.dataset.editing = "true";
+  tr.dataset.entryId = entry && entry.id ? entry.id : "";
+  tr.dataset.rowKey = getLivestockRowKey(category, entry && entry.id ? entry.id : "");
+  const currentPhoto =
+    entry && entry.photo && entry.photo.thumbnail_url ? entry.photo.thumbnail_url : "";
+  if (currentPhoto) {
+    tr.dataset.photoUrl = currentPhoto;
+  }
+
+  const thumbTd = document.createElement("td");
+  const thumb = document.createElement("div");
+  thumb.className = "livestock-thumb";
+  if (currentPhoto) {
+    const img = document.createElement("img");
+    img.src = currentPhoto;
+    img.alt = entry.photo.filename || "Photo";
+    thumb.appendChild(img);
+  } else {
+    thumb.textContent = "Photo";
+  }
+  thumbTd.appendChild(thumb);
+  const photoInput = document.createElement("input");
+  photoInput.type = "file";
+  photoInput.accept = "image/*";
+  photoInput.className =
+    "form-control form-control-sm livestock-photo-input mt-1 livestock-input-photo";
+  thumbTd.appendChild(photoInput);
+  tr.appendChild(thumbTd);
+
+  const speciesTd = document.createElement("td");
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.className = "form-control form-control-sm livestock-input-name";
+  nameInput.placeholder = "Nom de l'espece";
+  nameInput.value = entry ? entry.name || "" : "";
+  speciesTd.appendChild(nameInput);
+  const hint = document.createElement("div");
+  hint.className = "livestock-row-status mt-1";
+  hint.textContent = "Cliquez sur la disquette pour enregistrer.";
+  speciesTd.appendChild(hint);
+  if (category === "animal") {
+    speciesTd.appendChild(buildAnimalParamEditor(entry || {}));
+  }
+  tr.appendChild(speciesTd);
+
+  const introTd = document.createElement("td");
+  const introInput = document.createElement("input");
+  introInput.type = "date";
+  introInput.className = "form-control form-control-sm livestock-input-intro";
+  introInput.value = toLivestockDateInput(entry ? entry.introduced_at : "");
+  introTd.appendChild(introInput);
+  tr.appendChild(introTd);
+
+  const countTd = document.createElement("td");
+  const countInput = document.createElement("input");
+  countInput.type = "number";
+  countInput.min = "0";
+  countInput.step = "1";
+  countInput.className = "form-control form-control-sm livestock-input-count";
+  const defaultCount =
+    entry && Number.isFinite(Number(entry.count)) ? Number(entry.count) : 1;
+  countInput.value = defaultCount;
+  countTd.appendChild(countInput);
+  tr.appendChild(countTd);
+
+  const removedTd = document.createElement("td");
+  const removedInput = document.createElement("input");
+  removedInput.type = "date";
+  removedInput.className = "form-control form-control-sm livestock-input-removed";
+  removedInput.value = toLivestockDateInput(entry ? entry.removed_at : "");
+  removedTd.appendChild(removedInput);
+  tr.appendChild(removedTd);
+
+  const actionsTd = document.createElement("td");
+  actionsTd.className = "text-end";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "btn btn-sm btn-aqua me-2";
+  saveBtn.dataset.action = "livestockSave";
+  saveBtn.innerHTML = '<i class="bi bi-save"></i>';
+  actionsTd.appendChild(saveBtn);
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "btn btn-sm btn-outline-light";
+  cancelBtn.dataset.action = "livestockCancelEdit";
+  cancelBtn.innerHTML = '<i class="bi bi-x-circle"></i>';
+  actionsTd.appendChild(cancelBtn);
+  tr.appendChild(actionsTd);
+
+  return tr;
+}
+
+function renderLivestockZone(category, entries) {
+  const body = getLivestockBody(category);
+  if (!body) return;
+  body.innerHTML = "";
+  let rows = 0;
+  if (livestockEditContext && livestockEditContext.category === category && livestockEditContext.isNew) {
+    body.appendChild(buildLivestockEditRow(null, category));
+    rows += 1;
+  }
+  entries.forEach((entry) => {
+    const isEditing =
+      livestockEditContext &&
+      livestockEditContext.category === category &&
+      !livestockEditContext.isNew &&
+      livestockEditContext.id === entry.id;
+    const row = isEditing
+      ? buildLivestockEditRow(entry, category)
+      : buildLivestockViewRow(entry, category);
+    body.appendChild(row);
+    rows += 1;
+  });
+  if (!rows) {
+    body.appendChild(buildLivestockEmptyRow(category));
+  }
+}
+
+function updateLivestockCounters() {
+  ["animal", "plant"].forEach((category) => {
+    const entries = getLivestockArray(category);
+    let active = 0;
+    entries.forEach((entry) => {
+      if (!entry.removed_at) {
+        active += 1;
+      }
+    });
+    const archived = Math.max(0, entries.length - active);
+    const domKey = getLivestockDomKey(category);
+    const activeEl = document.getElementById(`livestock${domKey}ActiveBadge`);
+    if (activeEl) {
+      activeEl.textContent = `Actifs: ${active}`;
+    }
+    const inactiveEl = document.getElementById(`livestock${domKey}InactiveBadge`);
+    if (inactiveEl) {
+      inactiveEl.textContent = `Sortis: ${archived}`;
+    }
+  });
+}
+
+function renderLivestockTables() {
+  renderLivestockZone("animal", livestockCatalogState.animals || []);
+  renderLivestockZone("plant", livestockCatalogState.plants || []);
+  updateLivestockCounters();
+}
+
+function findLivestockEntry(category, entryId) {
+  if (!entryId) return null;
+  return getLivestockArray(category).find((entry) => entry.id === entryId) || null;
+}
+
+function cleanupLivestockPreviews(rowKey) {
+  if (typeof rowKey === "string" && rowKey) {
+    const existing = livestockPreviewUrls.get(rowKey);
+    if (existing) {
+      URL.revokeObjectURL(existing);
+      livestockPreviewUrls.delete(rowKey);
+    }
+    return;
+  }
+  livestockPreviewUrls.forEach((url) => URL.revokeObjectURL(url));
+  livestockPreviewUrls.clear();
+}
+
+function handleLivestockPhotoPreview(input) {
+  const row = input.closest("[data-livestock-row]");
+  if (!row) return;
+  const key = row.dataset.rowKey || row.dataset.entryId || `draft-${row.dataset.category || ""}`;
+  cleanupLivestockPreviews(key);
+  const file = input.files && input.files[0];
+  const thumb = row.querySelector(".livestock-thumb");
+  if (!thumb) return;
+  if (file) {
+    const url = URL.createObjectURL(file);
+    livestockPreviewUrls.set(key, url);
+    thumb.innerHTML = "";
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = file.name;
+    thumb.appendChild(img);
+  } else {
+    const photoUrl = row.dataset.photoUrl;
+    thumb.innerHTML = "";
+    if (photoUrl) {
+      const img = document.createElement("img");
+      img.src = photoUrl;
+      img.alt = "Photo";
+      thumb.appendChild(img);
+    } else {
+      thumb.textContent = "Photo";
+    }
+  }
+}
+
+function startLivestockCreate(category) {
+  if (!category) return;
+  if (livestockEditContext) {
+    if (livestockEditContext.category === category && livestockEditContext.isNew) {
+      return;
+    }
+    showToast("Terminez l'edition en cours avant d'ajouter une nouvelle fiche.", "warning");
+    return;
+  }
+  livestockEditContext = { category, id: null, isNew: true };
+  renderLivestockTables();
+  const label = LIVESTOCK_CATEGORY_LABELS[category] || category;
+  setLivestockStatus(`Edition ${label} en cours.`, "secondary");
+}
+
+function startLivestockEdit(category, entryId) {
+  if (!category || !entryId) return;
+  if (livestockEditContext) {
+    if (!livestockEditContext.isNew && livestockEditContext.id === entryId) {
+      return;
+    }
+    showToast("Terminez l'edition en cours avant de modifier une autre fiche.", "warning");
+    return;
+  }
+  const entry = findLivestockEntry(category, entryId);
+  if (!entry) {
+    showToast("Entree introuvable.", "danger");
+    return;
+  }
+  livestockEditContext = { category, id: entryId, isNew: false };
+  renderLivestockTables();
+  setLivestockStatus(`Edition de ${entry.name || "cette fiche"}.`, "secondary");
+}
+
+function cancelLivestockEdit() {
+  if (!livestockEditContext) return;
+  cleanupLivestockPreviews();
+  livestockEditContext = null;
+  renderLivestockTables();
+  setLivestockStatus("Edition annulee.", "secondary");
+}
+
+async function saveLivestockEntry(trigger) {
+  if (!livestockEditContext) {
+    showToast("Aucune edition en cours.", "warning");
+    return;
+  }
+  const row = trigger.closest("[data-livestock-row]");
+  if (!row) return;
+  const category = livestockEditContext.category;
+  const nameInput = row.querySelector(".livestock-input-name");
+  const introInput = row.querySelector(".livestock-input-intro");
+  const removedInput = row.querySelector(".livestock-input-removed");
+  const countInput = row.querySelector(".livestock-input-count");
+  const photoInput = row.querySelector(".livestock-input-photo");
+  const paramInputs = {};
+  LIVESTOCK_PARAM_FIELDS.forEach(({ key }) => {
+    paramInputs[key] = {
+      min: row.querySelector(`.livestock-input-${key}-min`),
+      max: row.querySelector(`.livestock-input-${key}-max`),
+    };
+  });
+  const resistanceInput = row.querySelector(".livestock-input-resistance");
+  const name = (nameInput?.value || "").trim();
+  if (!name) {
+    showToast("Ajoutez un nom d'espece.", "danger");
+    nameInput?.focus();
+    return;
+  }
+  const introducedValue = introInput?.value || "";
+  const removedValue = removedInput?.value || "";
+  const countValue = countInput?.value || "0";
+
+  const formData = new FormData();
+  formData.append("name", name);
+  formData.append("introduced_at", introducedValue);
+  formData.append("removed_at", removedValue);
+  formData.append("count", countValue);
+  formData.append("category", category);
+  LIVESTOCK_PARAM_FIELDS.forEach(({ key }) => {
+    const minInput = paramInputs[key]?.min;
+    const maxInput = paramInputs[key]?.max;
+    if (minInput) {
+      formData.append(`${key}_min`, minInput.value || "");
+    }
+    if (maxInput) {
+      formData.append(`${key}_max`, maxInput.value || "");
+    }
+  });
+  if (resistanceInput) {
+    formData.append("resistance", resistanceInput.value.trim());
+  }
+  if (photoInput && photoInput.files && photoInput.files[0]) {
+    formData.append("photo", photoInput.files[0]);
+  }
+
+  const endpoint = livestockEditContext.isNew
+    ? "/logbook/catalog"
+    : `/logbook/catalog/${livestockEditContext.id}`;
+  const method = livestockEditContext.isNew ? "POST" : "PUT";
+  const cancelBtn = row.querySelector('[data-action="livestockCancelEdit"]');
+
+  trigger.disabled = true;
+  if (cancelBtn) cancelBtn.disabled = true;
+  setLivestockStatus("Enregistrement en cours...", "secondary");
+  try {
+    const res = await fetch(endpoint, { method, body: formData });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (err) {
+      // ignore parse error
+    }
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    showToast("Fiche enregistree.", "success");
+    setLivestockStatus("Fiche enregistree.", "success");
+    livestockEditContext = null;
+    cleanupLivestockPreviews();
+    await loadLivestockCatalog(false, false);
+  } catch (err) {
+    console.error("saveLivestockEntry", err);
+    showToast(`Sauvegarde impossible: ${err.message}`, "danger");
+    setLivestockStatus(`Sauvegarde impossible: ${err.message}`, "danger");
+  } finally {
+    trigger.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = false;
+  }
+}
+
+async function deleteLivestockEntry(trigger) {
+  const entryId = trigger.dataset.entryId;
+  const category = trigger.dataset.category;
+  if (!entryId || !category) return;
+  if (livestockEditContext) {
+    showToast("Terminez l'edition avant de supprimer une fiche.", "warning");
+    return;
+  }
+  const entry = findLivestockEntry(category, entryId);
+  const label = entry?.name || "cette fiche";
+  const confirmed = await showPopin(
+    `Supprimer la fiche ${label} ?`,
+    "danger",
+    { confirmable: true, confirmText: "Supprimer", cancelText: "Annuler" }
+  );
+  if (!confirmed) return;
+  trigger.disabled = true;
+  setLivestockStatus("Suppression de la fiche...", "secondary");
+  try {
+    const res = await fetch(`/logbook/catalog/${entryId}`, { method: "DELETE" });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (err) {
+      // ignore parse error
+    }
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    showToast("Fiche supprimee.", "success");
+    setLivestockStatus("Fiche supprimee.", "success");
+    await loadLivestockCatalog(false, false);
+  } catch (err) {
+    console.error("deleteLivestockEntry", err);
+    showToast(`Suppression impossible: ${err.message}`, "danger");
+    setLivestockStatus(`Suppression impossible: ${err.message}`, "danger");
+  } finally {
+    trigger.disabled = false;
+  }
+}
+
+async function fetchLivestockComfort(trigger) {
+  const row = trigger.closest("[data-livestock-row]");
+  if (!row) return;
+  const nameInput = row.querySelector(".livestock-input-name");
+  const speciesName = (nameInput?.value || "").trim();
+  if (!speciesName) {
+    showToast("Ajoutez un nom d'espece avant d'utiliser l'IA.", "warning");
+    nameInput?.focus();
+    return;
+  }
+  const prevLabel = trigger.innerHTML;
+  trigger.disabled = true;
+  trigger.innerHTML =
+    '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>IA...';
+  setLivestockStatus("Recherche des parametres via IA...", "secondary");
+  try {
+    const res = await fetch("/logbook/catalog/comfort", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: speciesName, category: "animal" }),
+    });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (err) {
+      // ignore parsing error here, fallback to HTTP status
+    }
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    applyComfortRangesToInputs(row, data.ranges || {});
+    showToast("Parametres IA importes.", "success");
+    setLivestockStatus("Parametres IA importes.", "success");
+  } catch (err) {
+    console.error("fetchLivestockComfort", err);
+    showToast(`IA indisponible: ${err.message}`, "danger");
+    setLivestockStatus(`IA indisponible: ${err.message}`, "danger");
+  } finally {
+    trigger.disabled = false;
+    trigger.innerHTML = prevLabel;
+  }
+}
+
+async function loadLivestockCatalog(showErrors = true, resetStatus = true) {
+  const zone = document.getElementById("livestockCatalogZone");
+  if (!zone) return;
+  if (resetStatus) {
+    setLivestockStatus("Chargement du catalogue...", "secondary");
+  }
+  if (!livestockEditContext) {
+    ["animal", "plant"].forEach((category) =>
+      setLivestockLoading(category, "Chargement du catalogue...")
+    );
+  }
+  try {
+    const res = await fetch("/logbook/catalog");
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    livestockCatalogState.animals = Array.isArray(data.animals) ? data.animals : [];
+    livestockCatalogState.plants = Array.isArray(data.plants) ? data.plants : [];
+    renderLivestockTables();
+    loadWaterTargets(true);
+    if (resetStatus) {
+      setLivestockStatus("", "secondary");
+    }
+  } catch (err) {
+    console.error("loadLivestockCatalog", err);
+    if (showErrors) {
+      showToast(`Catalogue vivant indisponible: ${err.message}`, "danger");
+    }
+    setLivestockStatus(`Catalogue indisponible: ${err.message}`, "danger");
+    ["animal", "plant"].forEach((category) => {
+      const body = getLivestockBody(category);
+      if (body && !body.children.length) {
+        setLivestockLoading(category, `Erreur: ${err.message}`);
+      }
+    });
+  }
+}
+
+function openLivestockDetail(entry) {
+  if (!mediaViewerEl || !mediaViewerContentEl) return;
+  mediaViewerContentEl.innerHTML = "";
+  const wrapper = document.createElement("div");
+  wrapper.className = "livestock-detail";
+  if (entry.photo && entry.photo.url) {
+    const img = document.createElement("img");
+    img.src = entry.photo.url;
+    img.alt = entry.photo.filename || entry.name || "Photo";
+    wrapper.appendChild(img);
+  }
+  const info = document.createElement("div");
+  info.className = "livestock-detail-info";
+  const details = [
+    ["Categorie", LIVESTOCK_CATEGORY_LABELS[entry.category] || entry.category || "-"],
+    ["Espece", entry.name || "-"],
+    ["Introduit", formatLivestockDate(entry.introduced_at)],
+    ["Nombre", entry.count ?? "-"],
+    ["Sortie", formatLivestockDate(entry.removed_at)],
+  ];
+  if (entry.category === "animal") {
+    LIVESTOCK_PARAM_FIELDS.forEach(({ key, label }) => {
+      const text = formatLivestockRangeLabel(label, entry[`${key}_min`], entry[`${key}_max`]);
+      details.push([label, text || "Non renseigne"]);
+    });
+    if (entry.resistance) {
+      details.push(["Resistance", entry.resistance]);
+    }
+  }
+  details.forEach(([label, value]) => {
+    const group = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const span = document.createElement("span");
+    span.textContent = value === undefined || value === null || value === "" ? "—" : value;
+    group.appendChild(title);
+    group.appendChild(document.createElement("br"));
+    group.appendChild(span);
+    info.appendChild(group);
+  });
+  wrapper.appendChild(info);
+  mediaViewerContentEl.appendChild(wrapper);
+  mediaViewerEl.classList.remove("d-none");
+  mediaViewerEl.classList.add("show");
+}
+
+function initLivestockModule() {
+  const zone = document.getElementById("livestockCatalogZone");
+  if (!zone) return;
+  zone.addEventListener("dblclick", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    const row = target.closest("[data-livestock-row]");
+    if (!row || row.dataset.editing === "true") return;
+    const category = row.dataset.category;
+    const entryId = row.dataset.entryId;
+    if (!category || !entryId) return;
+    const entry = findLivestockEntry(category, entryId);
+    if (entry) {
+      openLivestockDetail(entry);
+    }
+  });
+  zone.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.classList.contains("livestock-input-photo")) {
+      handleLivestockPhotoPreview(target);
+    }
+  });
+  loadLivestockCatalog(false);
+}
+
+
 function initMediaViewer() {
   mediaViewerEl = document.getElementById("mediaViewer");
   mediaViewerContentEl = document.getElementById("mediaViewerContent");
@@ -3397,7 +4549,9 @@ function init() {
   initPopin();
   initCameraModule();
   initLogbookModule();
+  initLivestockModule();
   initAiModule();
+  loadWaterTargets();
   refreshPorts();
   refreshState();
   nextRefreshAt = Date.now() + refreshIntervalMs;
